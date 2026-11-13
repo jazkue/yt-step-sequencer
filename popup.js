@@ -13,6 +13,9 @@ const transport = document.querySelector("#transport");
 const status = document.querySelector("#status");
 const timing = document.querySelector("#timing");
 const pads = document.querySelector("#pads");
+const connectBox = document.querySelector("#connect");
+const link = document.querySelector("#link");
+const flashTimers = new WeakMap();
 let tabId = null;
 let playing = false;
 let polling = false;
@@ -58,6 +61,32 @@ for (const key of "1234567890") {
   pads.append(button);
   padButtons.set(key, button);
 }
+
+function flash(button) {
+  button.classList.add("flash");
+  clearTimeout(flashTimers.get(button));
+  flashTimers.set(button, setTimeout(() => button.classList.remove("flash"), 150));
+}
+
+function setConnected(value) {
+  connectBox.checked = value;
+  link.classList.toggle("connected", value);
+}
+
+connectBox.addEventListener("change", () => {
+  link.classList.toggle("connected", connectBox.checked);
+  const randomize = connectBox.checked;
+  chrome.storage.local.set({ randomize });
+  if (playing) {
+    enqueue(async () => {
+      try {
+        await send("update", { randomize });
+      } catch (error) {
+        showStatus(error.message || "could not update the sequence.", true);
+      }
+    });
+  }
+});
 
 function updatePadIndicator(value) {
   for (const [key, button] of padButtons) {
@@ -189,6 +218,7 @@ function replaceSequence(sequence) {
 }
 
 randomizeButton.addEventListener("click", () => {
+  flash(randomizeButton);
   const choices = "0123456789";
   replaceSequence(inputs.map(() => choices[Math.floor(Math.random() * 11)] ?? ""));
 });
@@ -233,6 +263,7 @@ function updateState(state, hydrate = false) {
   if (playing && hydrate) {
     inputs.forEach((input, index) => { input.value = state.sequence[index]; });
     bpmInput.value = String(state.bpm);
+    setConnected(state.randomizeOnStart === true);
   }
   markBpmValidity();
   if (state.playbackError) showStatus(state.playbackError, true);
@@ -243,6 +274,11 @@ function updateStepIndicator(state) {
   if (!Number.isInteger(state.stepSerial) || state.stepSerial < lastStepSerial) return;
   if ("padValue" in state) updatePadIndicator(state.padValue);
   lastStepSerial = state.stepSerial;
+  if (state.randomized && Array.isArray(state.sequence)) {
+    inputs.forEach((input, index) => { input.value = state.sequence[index]; });
+    chrome.storage.local.set({ sequence: state.sequence });
+    flash(randomizeButton);
+  }
   for (const [index, label] of [...steps.children].entries()) {
     label.classList.toggle("active", index === state.currentStep);
   }
@@ -450,7 +486,7 @@ form.addEventListener("submit", async event => {
   await enqueue(async () => {
     try {
       await chrome.storage.local.set({ sequence, bpm });
-      const state = await send("play", { sequence, bpm });
+      const state = await send("play", { sequence, bpm, randomize: connectBox.checked });
       status.classList.remove("error");
       updateState(state);
     } catch (error) {
@@ -469,7 +505,8 @@ form.addEventListener("submit", async event => {
 async function initialize() {
   setUnavailable("connecting to youtube...");
   try {
-    const saved = await chrome.storage.local.get(["sequence", "bpm"]);
+    const saved = await chrome.storage.local.get(["sequence", "bpm", "randomize"]);
+    setConnected(saved.randomize === true);
     if (Array.isArray(saved.sequence) && saved.sequence.length === 8 &&
         saved.sequence.every(validStep)) {
       inputs.forEach((input, index) => { input.value = saved.sequence[index]; });

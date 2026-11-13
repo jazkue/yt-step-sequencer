@@ -617,3 +617,20 @@ Deno.test("invalid live edits leave the existing pattern and timer intact", () =
   app.advance(500);
   assert.equal(app.events[2].key, "1");
 });
+
+Deno.test("randomize on step 1 reshuffles the sequence each loop", () => {
+  const app = setup();
+  const observer = app.connect();
+  const sequence = Array(8).fill("1");
+  const state = app.send("play", { sequence, bpm: 120, randomize: true });
+  assert.equal(state.randomizeOnStart, true);
+  assert.equal(observer.updates[0].randomized, true);
+  assert.equal(observer.updates[0].sequence.length, 8);
+  app.advance(500);
+  assert.equal(observer.updates[1].randomized, undefined);
+  app.send("update", { randomize: false });
+  for (let i = 2; i <= 8; i++) app.advance(500 * i);
+  assert.equal(observer.updates.at(-1).currentStep, 0);
+  assert.equal(observer.updates.at(-1).randomized, undefined);
+  app.send("stop");
+});

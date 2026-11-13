@@ -10,6 +10,7 @@
   let generation = 0;
   let stepSerial = 0;
   let stepValue = null;
+  let randomizeOnStart = false;
   let padValue = null;
   let timingDelays = 0;
   let playbackError = null;
@@ -33,12 +34,13 @@
     currentStep = -1;
     stepValue = null;
     padValue = null;
+    randomizeOnStart = false;
     nextStep = 0;
     videoId = null;
   }
 
   function state() {
-    return { playing: sequence !== null, sequence, bpm, currentStep, stepValue, stepSerial, timingDelays, playbackError, padValue };
+    return { playing: sequence !== null, sequence, bpm, currentStep, stepValue, stepSerial, timingDelays, playbackError, padValue, randomizeOnStart };
   }
 
   chrome.runtime.onConnect.addListener(port => {
@@ -120,13 +122,15 @@
     if (startTime - nextTime >= interval) timingDelays++;
     currentStep = nextStep;
     nextStep = (nextStep + 1) % sequence.length;
+    const randomized = randomizeOnStart && currentStep === 0;
+    if (randomized) sequence = sequence.map(() => "0123456789"[Math.floor(Math.random() * 11)] ?? "");
     stepValue = sequence[currentStep];
     if (stepValue !== "") {
       dispatchDigit(player, stepValue);
       padValue = stepValue;
     }
     stepSerial++;
-    notifyObservers({ currentStep, stepValue, padValue, stepSerial, timingDelays });
+    notifyObservers({ currentStep, stepValue, padValue, stepSerial, timingDelays, ...(randomized && { sequence, randomized }) });
     nextTime += interval;
     const now = performance.now();
     if (nextTime - now < interval / 4) {
@@ -203,6 +207,7 @@
         }
         sequence = message.sequence.slice();
         bpm = message.bpm;
+        randomizeOnStart = message.randomize === true;
         videoId = id;
         timingDelays = 0;
         nextTime = performance.now();
@@ -241,6 +246,8 @@
           return;
         }
         sequence[message.step] = message.value;
+      } else if (message.randomize !== undefined) {
+        randomizeOnStart = message.randomize === true;
       } else if (message.bpm !== undefined) {
         if (!validBpm(message.bpm)) {
           sendResponse({ ok: false, error: "Enter a BPM from 1 to 999." });
