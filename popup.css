@@ -59,6 +59,7 @@ input {
 .step input { height: 36px; font-size: 15px; }
 .step.active input { background: var(--accent); color: var(--ink); }
 .step.selected input { outline: 2px solid var(--focus); outline-offset: 2px; }
+.step.drop-target input { outline: 2px dashed var(--focus); outline-offset: 2px; }
 .step-controls { display: flex; gap: 5px; margin-top: 10px; }
 .step-controls #next-step { margin-left: auto; }
 .step-controls button {

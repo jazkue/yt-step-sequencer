@@ -50,6 +50,11 @@ for (const key of "1234567890") {
   button.setAttribute("aria-label", `play ${key}`);
   button.disabled = true;
   button.addEventListener("click", () => triggerPad(key));
+  button.draggable = true;
+  button.addEventListener("dragstart", event => {
+    event.dataTransfer.setData("application/x-yt-pad", key);
+    event.dataTransfer.effectAllowed = "copy";
+  });
   pads.append(button);
   padButtons.set(key, button);
 }
@@ -94,11 +99,49 @@ document.addEventListener("keydown", event => {
     advanceStep();
   } else if (event.key === "Escape" && selectedStep !== null) {
     event.preventDefault();
+    if (inputs.includes(document.activeElement)) document.activeElement.blur();
     selectStep(null);
   } else if (/^[0-9]$/.test(event.key) && event.target !== bpmInput) {
     event.preventDefault();
     triggerPad(event.key);
   }
+});
+
+document.addEventListener("pointerdown", event => {
+  if (selectedStep === null) return;
+  if (steps.contains(event.target) || pads.contains(event.target) ||
+      nextStepButton.contains(event.target)) return;
+  selectStep(null);
+});
+
+function dropTarget(event) {
+  const label = event.target.closest?.(".step");
+  return label && event.dataTransfer.types.includes("application/x-yt-pad") ? label : null;
+}
+
+steps.addEventListener("dragover", event => {
+  const label = dropTarget(event);
+  if (!label) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "copy";
+  label.classList.add("drop-target");
+});
+
+steps.addEventListener("dragleave", event => {
+  event.target.closest?.(".step")?.classList.remove("drop-target");
+});
+
+steps.addEventListener("drop", event => {
+  const label = dropTarget(event);
+  if (!label) return;
+  event.preventDefault();
+  label.classList.remove("drop-target");
+  const key = event.dataTransfer.getData("application/x-yt-pad");
+  const input = label.querySelector("input");
+  if (!validStep(key) || !input) return;
+  input.value = key;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  selectStep(inputs.indexOf(input));
 });
 
 function selectStep(index) {
