@@ -8,6 +8,10 @@
   let nextTime = 0;
   let videoId = null;
   let generation = 0;
+  let stepSerial = 0;
+  let timingDelays = 0;
+  let mutedForRest = null;
+  const observers = new Set();
 
   function currentVideoId() {
     const url = new URL(location.href);
@@ -16,6 +20,7 @@
 
   function stop() {
     generation++;
+    endRest();
     if (timer !== null) clearTimeout(timer);
     timer = null;
     sequence = null;
@@ -26,12 +31,39 @@
   }
 
   function state() {
-    return { playing: sequence !== null, sequence, bpm, currentStep };
+    return { playing: sequence !== null, sequence, bpm, currentStep, stepSerial, timingDelays };
   }
+
+  chrome.runtime.onConnect.addListener(port => {
+    if (port.name !== `${MESSAGE_PREFIX}steps`) return;
+    observers.add(port);
+    port.onDisconnect.addListener(() => observers.delete(port));
+  });
 
   function validSequence(value) {
     return Array.isArray(value) && value.length === 8 &&
-      value.every(item => typeof item === "string" && /^[0-9]$/.test(item));
+      value.every(validStep);
+  }
+
+  function validStep(value) {
+    return typeof value === "string" && /^[0-9]?$/.test(value);
+  }
+
+  function endRest() {
+    if (!mutedForRest) return;
+    if (mutedForRest.video.muted) mutedForRest.video.muted = mutedForRest.wasMuted;
+    mutedForRest = null;
+  }
+
+  function beginRest(video) {
+    if (mutedForRest?.video === video) {
+      if (!video.muted) mutedForRest.wasMuted = false;
+      video.muted = true;
+      return;
+    }
+    endRest();
+    mutedForRest = { video, wasMuted: video.muted };
+    video.muted = true;
   }
 
   function validBpm(value) {
@@ -57,28 +89,42 @@
       return;
     }
     const player = document.querySelector(".html5-video-player");
-    if (!player) {
+    const video = player?.querySelector("video");
+    if (!player || !video) {
       stop();
       return;
     }
 
+    const interval = 60000 / bpm;
+    const startTime = performance.now();
+    if (startTime - nextTime >= interval) timingDelays++;
     currentStep = nextStep;
     nextStep = (nextStep + 1) % sequence.length;
-    dispatchDigit(player, sequence[currentStep]);
-
-    const interval = 60000 / bpm;
+    if (sequence[currentStep] === "") {
+      beginRest(video);
+    } else {
+      endRest();
+      dispatchDigit(player, sequence[currentStep]);
+    }
+    stepSerial++;
+    for (const port of observers) {
+      try {
+        port.postMessage({ currentStep, stepSerial, timingDelays });
+      } catch (error) {
+        observers.delete(port);
+        console.warn("Could not send step update:", error);
+      }
+    }
     nextTime += interval;
     const now = performance.now();
-    if (nextTime <= now) {
-      const missed = Math.floor((now - nextTime) / interval) + 1;
-      nextStep = (nextStep + missed) % sequence.length;
-      nextTime += missed * interval;
+    if (nextTime - now < interval / 4) {
+      nextTime = now + interval;
     }
     timer = setTimeout(tick, Math.max(0, nextTime - now));
   }
 
   document.addEventListener("yt-navigate-finish", () => {
-    if (sequence && currentVideoId() !== videoId) stop();
+    if ((sequence && currentVideoId() !== videoId) || (mutedForRest && !sequence)) stop();
   });
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -105,11 +151,20 @@
         return;
       }
       const player = document.querySelector(".html5-video-player");
-      if (!currentVideoId() || !player) {
+      const video = player?.querySelector("video");
+      if (!currentVideoId() || !player || !video) {
         sendResponse({ ok: false, error: "Open a YouTube video and wait for the player to load." });
         return;
       }
+      endRest();
       dispatchDigit(player, message.key);
+      if (video.paused) {
+        video.play().then(
+          () => sendResponse({ ok: true }),
+          () => sendResponse({ ok: false, error: "Could not start the video. Press play on YouTube and try again." })
+        );
+        return true;
+      }
       sendResponse({ ok: true });
       return;
     }
@@ -122,7 +177,7 @@
         return;
       }
       if (!validSequence(message.sequence) || !validBpm(message.bpm)) {
-        sendResponse({ ok: false, error: "Enter eight digits from 0 to 9 and a BPM from 1 to 999." });
+        sendResponse({ ok: false, error: "Steps must be empty or a digit from 0 to 9, and BPM must be from 1 to 999." });
         return;
       }
       stop();
@@ -131,18 +186,22 @@
         if (attempt !== generation || currentVideoId() !== id ||
             document.querySelector(".html5-video-player") !== player ||
             player.querySelector("video") !== video) {
+          if (attempt === generation) endRest();
           sendResponse({ ok: false, error: "Playback was cancelled or the video changed." });
           return;
         }
         sequence = message.sequence.slice();
         bpm = message.bpm;
         videoId = id;
+        timingDelays = 0;
         nextTime = performance.now();
         tick();
         sendResponse({ ok: true, ...state() });
       };
       if (video.paused) {
+        if (message.sequence[0] === "") beginRest(video);
         video.play().then(start, () => {
+          if (attempt === generation) endRest();
           sendResponse({ ok: false, error: "Could not start the video. Press play on YouTube and try again." });
         });
         return true;
@@ -158,14 +217,14 @@
       }
       if (message.sequence !== undefined) {
         if (!validSequence(message.sequence)) {
-          sendResponse({ ok: false, error: "Enter eight digits from 0 to 9." });
+          sendResponse({ ok: false, error: "Steps must be empty or a digit from 0 to 9." });
           return;
         }
         sequence = message.sequence.slice();
       } else if (message.step !== undefined) {
         if (!Number.isInteger(message.step) || message.step < 0 || message.step >= sequence.length ||
-            typeof message.value !== "string" || !/^[0-9]$/.test(message.value)) {
-          sendResponse({ ok: false, error: "Enter a digit from 0 to 9." });
+            !validStep(message.value)) {
+          sendResponse({ ok: false, error: "Steps must be empty or a digit from 0 to 9." });
           return;
         }
         sequence[message.step] = message.value;

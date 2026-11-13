@@ -3,12 +3,15 @@ const form = document.querySelector("#sequencer");
 const settings = document.querySelector("#settings");
 const steps = document.querySelector("#steps");
 const randomizeButton = document.querySelector("#randomize");
+const clearButton = document.querySelector("#clear");
+const resetButton = document.querySelector("#reset");
 const nextStepButton = document.querySelector("#next-step");
 const bpmInput = document.querySelector("#bpm");
 const bpmDecrease = document.querySelector("#bpm-decrease");
 const bpmIncrease = document.querySelector("#bpm-increase");
 const transport = document.querySelector("#transport");
 const status = document.querySelector("#status");
+const timing = document.querySelector("#timing");
 const pads = document.querySelector("#pads");
 let tabId = null;
 let playing = false;
@@ -19,6 +22,7 @@ let commandQueue = Promise.resolve();
 let bpmTimer = null;
 let transportPending = false;
 let selectedStep = null;
+let lastStepSerial = -1;
 
 for (let index = 0; index < 8; index++) {
   const label = document.createElement("label");
@@ -28,10 +32,9 @@ for (let index = 0; index < 8; index++) {
   input.inputMode = "numeric";
   input.maxLength = 1;
   input.pattern = "[0-9]";
-  input.required = true;
   input.autocomplete = "off";
   input.value = String(index);
-  input.setAttribute("aria-label", `Step ${index + 1}`);
+  input.setAttribute("aria-label", `step ${index + 1}`);
   label.append(input);
   steps.append(label);
 }
@@ -44,7 +47,7 @@ for (const key of "1234567890") {
   const button = document.createElement("button");
   button.type = "button";
   button.textContent = key;
-  button.setAttribute("aria-label", `Play ${key}`);
+  button.setAttribute("aria-label", `play ${key}`);
   button.disabled = true;
   button.addEventListener("click", () => triggerPad(key));
   pads.append(button);
@@ -68,7 +71,7 @@ async function triggerPad(key) {
   try {
     await send("trigger", { key });
   } catch (error) {
-    showStatus(error.message || "Could not play the pad.", true);
+    showStatus(error.message || "could not play the pad.", true);
   }
 }
 
@@ -77,6 +80,8 @@ document.addEventListener("keydown", event => {
   if (event.key === "Enter" && selectedStep !== null &&
       event.target !== bpmInput && event.target !== nextStepButton &&
       event.target !== randomizeButton &&
+      event.target !== clearButton &&
+      event.target !== resetButton &&
       event.target !== transport &&
       event.target !== bpmDecrease && event.target !== bpmIncrease) {
     event.preventDefault();
@@ -110,8 +115,11 @@ function advanceStep() {
 
 nextStepButton.addEventListener("click", advanceStep);
 
-randomizeButton.addEventListener("click", () => {
-  const sequence = inputs.map(() => String(Math.floor(Math.random() * 10)));
+function validStep(value) {
+  return typeof value === "string" && /^[0-9]?$/.test(value);
+}
+
+function replaceSequence(sequence) {
   inputs.forEach((input, index) => { input.value = sequence[index]; });
   enqueue(async () => {
     try {
@@ -126,25 +134,31 @@ randomizeButton.addEventListener("click", () => {
         showGuidance();
       }
     } catch (error) {
-      showStatus(error.message || "Could not randomize the sequence.", true);
+      showStatus(error.message || "could not update the sequence.", true);
     }
   });
+}
+
+randomizeButton.addEventListener("click", () => {
+  replaceSequence(inputs.map(() => String(Math.floor(Math.random() * 10))));
 });
+clearButton.addEventListener("click", () => replaceSequence(inputs.map(() => "")));
+resetButton.addEventListener("click", () => replaceSequence(inputs.map((_, index) => String(index))));
 
 function showStatus(text, error = false) {
-  status.textContent = text;
+  status.textContent = text.toLowerCase();
   status.classList.toggle("error", error);
 }
 
 function showGuidance() {
-  if (inputs.some(input => !/^[0-9]$/.test(input.value))) {
-    showStatus("Enter a digit from 0 to 9 in each step.", true);
+  if (inputs.some(input => !validStep(input.value))) {
+    showStatus("steps must be empty or a digit from 0 to 9.", true);
   } else if (!validBpmInput()) {
-    showStatus("Enter a BPM from 1 to 999.", true);
+    showStatus("enter a bpm from 1 to 999.", true);
   } else if (selectedStep !== null) {
-    showStatus(`Step ${selectedStep + 1}: play a pad, Next or Enter to advance, Esc to exit.`);
+    showStatus(`step ${selectedStep + 1}: play a pad, step or enter to advance, esc to exit.`);
   } else {
-    showStatus(playing ? "Playing. Edit steps or BPM live." : "Press play to start.");
+    showStatus(playing ? "playing. edit steps or bpm live." : "press play to start.");
   }
 }
 
@@ -157,10 +171,13 @@ function updateState(state, hydrate = false) {
   for (const button of padButtons.values()) button.disabled = false;
   transport.disabled = transportPending;
   transport.classList.toggle("playing", playing);
-  transport.setAttribute("aria-label", playing ? "Stop" : "Play");
-  transport.title = playing ? "Stop" : "Play";
-  for (const [index, label] of [...steps.children].entries()) {
-    label.classList.toggle("active", playing && index === state.currentStep);
+  transport.setAttribute("aria-label", playing ? "stop" : "play");
+  transport.title = playing ? "stop" : "play";
+  if (!playing) {
+    for (const label of steps.children) label.classList.remove("active");
+    timing.hidden = true;
+  } else {
+    updateStepIndicator(state);
   }
   if (playing && hydrate) {
     inputs.forEach((input, index) => { input.value = state.sequence[index]; });
@@ -168,6 +185,17 @@ function updateState(state, hydrate = false) {
   }
   markBpmValidity();
   if (!status.classList.contains("error") || hydrate) showGuidance();
+}
+
+function updateStepIndicator(state) {
+  if (!Number.isInteger(state.stepSerial) || state.stepSerial < lastStepSerial) return;
+  lastStepSerial = state.stepSerial;
+  for (const [index, label] of [...steps.children].entries()) {
+    label.classList.toggle("active", index === state.currentStep);
+  }
+  const delays = state.timingDelays;
+  timing.hidden = !delays;
+  timing.textContent = delays ? `delayed beats: ${delays}.` : "";
 }
 
 function setUnavailable(message) {
@@ -183,7 +211,7 @@ function setUnavailable(message) {
 async function send(type, data = {}) {
   const response = await chrome.tabs.sendMessage(tabId, { type: prefix + type, ...data });
   if (!response || !response.ok) {
-    throw new Error(response?.error || "Could not connect to the player.");
+    throw new Error(response?.error || "could not connect to the player.");
   }
   return response;
 }
@@ -209,7 +237,7 @@ async function refresh(hydrate = false) {
   } catch (error) {
     if (!commandPending && version === commandVersion) {
       tabId = null;
-      setUnavailable(error.message || "Could not connect. Open or reload a YouTube video.");
+      setUnavailable(error.message || "could not connect. open or reload a youtube video.");
     }
   } finally {
     polling = false;
@@ -238,7 +266,7 @@ function updateLive(data) {
       status.classList.remove("error");
       updateState(state);
     } catch (error) {
-      showStatus(error.message || "Could not update the sequence.", true);
+      showStatus(error.message || "could not update the sequence.", true);
     }
   });
 }
@@ -253,24 +281,24 @@ inputs.forEach((input, step) => {
     input.select();
   });
   input.addEventListener("input", () => {
-    if (/^[0-9]$/.test(input.value)) {
+    if (validStep(input.value)) {
       if (playing) updateLive({ step, value: input.value });
       else {
         status.classList.remove("error");
         updateState({ playing: false, currentStep: -1 });
         const sequence = inputs.map(item => item.value);
-        if (sequence.every(value => /^[0-9]$/.test(value))) {
+        if (sequence.every(validStep)) {
           enqueue(async () => {
             try {
               await chrome.storage.local.set({ sequence });
             } catch (error) {
-              showStatus(error.message || "Could not save the sequence.", true);
+              showStatus(error.message || "could not save the sequence.", true);
             }
           });
         }
       }
     } else {
-      showStatus("Enter a digit from 0 to 9 in each step.", true);
+      showStatus("steps must be empty or a digit from 0 to 9.", true);
     }
     input.select();
   });
@@ -340,7 +368,7 @@ form.addEventListener("submit", async event => {
         status.classList.remove("error");
         updateState(state);
       } catch (error) {
-        showStatus(error.message || "Could not stop the sequence.", true);
+        showStatus(error.message || "could not stop the sequence.", true);
       } finally {
         transportPending = false;
         transport.disabled = false;
@@ -350,7 +378,7 @@ form.addEventListener("submit", async event => {
   }
   const sequence = inputs.map(input => input.value);
   const bpm = Number(bpmInput.value);
-  const validSteps = sequence.every(value => /^[0-9]$/.test(value));
+  const validSteps = sequence.every(validStep);
   const validBpm = markBpmValidity();
   if (!validSteps || !validBpm) {
     showGuidance();
@@ -374,7 +402,7 @@ form.addEventListener("submit", async event => {
       bpmInput.disabled = false;
       bpmDecrease.disabled = false;
       bpmIncrease.disabled = false;
-      showStatus(error.message || "Could not start the sequence.", true);
+      showStatus(error.message || "could not start the sequence.", true);
     } finally {
       transportPending = false;
       transport.disabled = false;
@@ -383,11 +411,11 @@ form.addEventListener("submit", async event => {
 });
 
 async function initialize() {
-  setUnavailable("Connecting to YouTube...");
+  setUnavailable("connecting to youtube...");
   try {
     const saved = await chrome.storage.local.get(["sequence", "bpm"]);
     if (Array.isArray(saved.sequence) && saved.sequence.length === 8 &&
-        saved.sequence.every(value => typeof value === "string" && /^[0-9]$/.test(value))) {
+        saved.sequence.every(validStep)) {
       inputs.forEach((input, index) => { input.value = saved.sequence[index]; });
     }
     if (Number.isInteger(saved.bpm) && saved.bpm >= 1 && saved.bpm <= 999) {
@@ -395,30 +423,40 @@ async function initialize() {
     }
     const target = new URLSearchParams(location.search).get("tabId");
     if (!target || !/^\d+$/.test(target) || !Number.isSafeInteger(Number(target))) {
-      setUnavailable("Open the sequencer from a YouTube video tab.");
+      setUnavailable("open the sequencer from a youtube video tab.");
       return;
     }
     let tab;
     try {
       tab = await chrome.tabs.get(Number(target));
     } catch {
-      setUnavailable("The original video tab is no longer available.");
+      setUnavailable("the original video tab is no longer available.");
       return;
     }
     const url = tab?.url ? new URL(tab.url) : null;
     if (!tab?.id || !url || url.protocol !== "https:" ||
         !["youtube.com", "www.youtube.com"].includes(url.hostname) ||
         url.pathname !== "/watch" || !url.searchParams.get("v")) {
-      setUnavailable("Open the sequencer from a YouTube video tab.");
+      setUnavailable("open the sequencer from a youtube video tab.");
       return;
     }
     tabId = tab.id;
+    const port = chrome.tabs.connect(tabId, { name: `${prefix}steps` });
+    port.onMessage.addListener(message => {
+      if (playing && tabId !== null && !transportPending) updateStepIndicator(message);
+    });
+    port.onDisconnect.addListener(() => {
+      if (tabId !== null) {
+        tabId = null;
+        setUnavailable("connection lost. reopen the sequencer from the youtube tab.");
+      }
+    });
     await refresh(true);
     setInterval(() => {
       refresh();
-    }, 200);
+    }, 1000);
   } catch {
-    setUnavailable("Could not start the extension. Try reopening it.");
+    setUnavailable("could not start the extension. try reopening it.");
   }
 }
 

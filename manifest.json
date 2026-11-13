@@ -1,11 +1,21 @@
 {
   "manifest_version": 3,
-  "name": "YouTube Step Sequencer",
+  "name": "youtube step sequencer",
   "version": "1.0.0",
-  "description": "Secuencia rítmica de saltos por teclado para videos de YouTube.",
-  "permissions": ["activeTab", "storage"],
+  "description": "secuencia rítmica de saltos por teclado para videos de youtube.",
+  "icons": {
+    "16": "icons/mpc-16.png",
+    "32": "icons/mpc-32.png",
+    "48": "icons/mpc-48.png",
+    "128": "icons/mpc-128.png"
+  },
+  "permissions": ["activeTab", "storage", "system.display"],
   "action": {
-    "default_title": "YouTube Step Sequencer"
+    "default_title": "youtube step sequencer",
+    "default_icon": {
+      "16": "icons/mpc-16.png",
+      "32": "icons/mpc-32.png"
+    }
   },
   "background": {
     "service_worker": "background.js"

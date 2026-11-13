@@ -10,12 +10,13 @@ function setup() {
   const events = [];
   const handlers = {};
   const location = { href: "https://www.youtube.com/watch?v=first" };
-  const video = { paused: false, play: () => Promise.resolve() };
+  const video = { paused: false, muted: false, play: () => Promise.resolve() };
   let player = {
     dispatchEvent: event => events.push(event),
     querySelector: selector => selector === "video" ? video : null
   };
   let listener;
+  let connectListener;
 
   class KeyboardEvent {
     constructor(type, options) {
@@ -31,7 +32,11 @@ function setup() {
       querySelector: () => player,
       addEventListener: (type, handler) => { handlers[type] = handler; }
     },
-    chrome: { runtime: { onMessage: { addListener: fn => { listener = fn; } } } },
+    chrome: { runtime: {
+      onMessage: { addListener: fn => { listener = fn; } },
+      onConnect: { addListener: fn => { connectListener = fn; } }
+    } },
+    console,
     setTimeout: (callback, delay) => {
       const id = ++timerId;
       timers.set(id, { callback, at: now + delay });
@@ -42,6 +47,16 @@ function setup() {
 
   return {
     events, location, video,
+    connect() {
+      const updates = [];
+      let disconnect;
+      connectListener({
+        name: "yt-step-sequencer:steps",
+        postMessage: message => updates.push(message),
+        onDisconnect: { addListener: fn => { disconnect = fn; } }
+      });
+      return { updates, disconnect: () => disconnect() };
+    },
     send(type, data = {}) {
       let response;
       listener({ type: `yt-step-sequencer:${type}`, ...data }, {}, value => { response = value; });
@@ -65,6 +80,7 @@ function setup() {
       handlers["yt-navigate-finish"]();
     },
     removePlayer() { player = null; },
+    removeVideo() { player.querySelector = () => null; },
     pending() { return timers.size; }
   };
 }
@@ -92,6 +108,27 @@ Deno.test("already playing video is not restarted", () => {
   app.video.play = () => { calls++; return Promise.resolve(); };
   assert.equal(app.send("play", { sequence, bpm: 120 }).playing, true);
   assert.equal(calls, 0);
+});
+
+Deno.test("a paused video is muted before starting on a rest and restored on failure or cancellation", async () => {
+  for (const outcome of ["play", "reject", "stop", "navigate"]) {
+    const app = setup();
+    app.video.paused = true;
+    let resolvePlay;
+    let rejectPlay;
+    app.video.play = () => {
+      assert.equal(app.video.muted, true);
+      return new Promise((resolve, reject) => { resolvePlay = resolve; rejectPlay = reject; });
+    };
+    const response = app.sendAsync("play", { sequence: ["", ...sequence.slice(1)], bpm: 120 });
+    if (outcome === "stop") app.send("stop");
+    if (outcome === "navigate") app.navigate("https://www.youtube.com/watch?v=other");
+    if (outcome === "reject") rejectPlay(new Error("blocked"));
+    else resolvePlay();
+    assert.equal((await response).ok, outcome === "play");
+    if (outcome === "play") app.send("stop");
+    assert.equal(app.video.muted, false);
+  }
 });
 
 Deno.test("playback failure is reported without starting the sequence", async () => {
@@ -138,14 +175,106 @@ Deno.test("plays eight keyboard events at one step per beat and loops", () => {
   assert.equal(app.send("status").currentStep, 0);
 });
 
-Deno.test("skips overdue beats instead of firing a burst", () => {
+Deno.test("empty steps mute for a beat, advance normally and restore sound", () => {
+  const app = setup();
+  const observer = app.connect();
+  const pattern = ["", "", "2", "", "4", "5", "6", "9"];
+  assert.equal(app.send("play", { sequence: pattern, bpm: 120 }).playing, true);
+  assert.equal(app.video.muted, true);
+  assert.equal(app.events.length, 0);
+  app.advance(500);
+  assert.equal(app.video.muted, true);
+  assert.equal(app.events.length, 0);
+  app.advance(1000);
+  assert.equal(app.video.muted, false);
+  assert.equal(app.events[0].key, "2");
+  app.advance(1500);
+  assert.equal(app.video.muted, true);
+  assert.deepEqual(observer.updates.map(update => update.currentStep), [0, 1, 2, 3]);
+  app.send("stop");
+  assert.equal(app.video.muted, false);
+});
+
+Deno.test("rests preserve an already muted video and restore on navigation", () => {
+  const app = setup();
+  app.video.muted = true;
+  app.send("play", { sequence: ["", "1", "2", "3", "4", "5", "6", "9"], bpm: 120 });
+  app.advance(500);
+  assert.equal(app.video.muted, true);
+  app.send("stop");
+  assert.equal(app.video.muted, true);
+  app.video.muted = false;
+  app.send("play", { sequence: Array(8).fill(""), bpm: 120 });
+  assert.equal(app.video.muted, true);
+  app.navigate("https://www.youtube.com/watch?v=other");
+  assert.equal(app.video.muted, false);
+});
+
+Deno.test("unmuting during consecutive rests is preserved after the rests", () => {
+  const app = setup();
+  app.video.muted = true;
+  app.send("play", { sequence: ["", "", "2", "3", "4", "5", "6", "9"], bpm: 120 });
+  app.video.muted = false;
+  app.advance(500);
+  assert.equal(app.video.muted, true);
+  app.advance(1000);
+  assert.equal(app.video.muted, false);
+});
+
+Deno.test("live rests and all-empty pattern keep timing and pad preview working", () => {
+  const app = setup();
+  app.send("play", { sequence, bpm: 120 });
+  assert.equal(app.send("update", { step: 1, value: "" }).ok, true);
+  app.advance(500);
+  assert.equal(app.video.muted, true);
+  assert.equal(app.events.length, 2);
+  assert.equal(app.send("trigger", { key: "9" }).ok, true);
+  assert.equal(app.video.muted, false);
+  assert.equal(app.events[2].key, "9");
+  assert.equal(app.send("update", { sequence: Array(8).fill("") }).ok, true);
+  app.advance(1000);
+  assert.equal(app.video.muted, true);
+  assert.equal(app.send("status").currentStep, 2);
+  assert.equal(app.pending(), 1);
+  app.send("stop");
+  assert.equal(app.video.muted, false);
+});
+
+Deno.test("delayed beats preserve step order without firing a burst", () => {
   const app = setup();
   app.send("play", { sequence, bpm: 120 });
   app.advance(1700);
   assert.equal(app.events.length, 4);
   assert.equal(app.send("status").currentStep, 1);
+  assert.equal(app.send("status").timingDelays, 1);
   app.advance(2000);
-  assert.equal(app.events[4].key, "4");
+  assert.equal(app.events.length, 4);
+  app.advance(2200);
+  assert.equal(app.events[4].key, "2");
+});
+
+Deno.test("step observers receive every dispatched beat, including at 999 BPM", () => {
+  const app = setup();
+  const observer = app.connect();
+  app.send("play", { sequence, bpm: 999 });
+  for (let i = 1; i < 16; i++) app.advance(i * 60000 / 999 + 0.001);
+  assert.deepEqual(observer.updates.map(update => update.currentStep),
+    [0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7]);
+  assert.equal(observer.updates.at(-1).timingDelays, 0);
+  observer.disconnect();
+  app.advance(16 * 60000 / 999 + 0.001);
+  assert.equal(observer.updates.length, 16);
+});
+
+Deno.test("a delayed timer is reported and the counter resets on restart", () => {
+  const app = setup();
+  const observer = app.connect();
+  app.send("play", { sequence, bpm: 120 });
+  app.advance(1500);
+  assert.equal(observer.updates.at(-1).timingDelays, 1);
+  app.send("stop");
+  app.send("play", { sequence, bpm: 120 });
+  assert.equal(observer.updates.at(-1).timingDelays, 0);
 });
 
 Deno.test("stop and navigation cancel the timer", () => {
@@ -210,6 +339,51 @@ Deno.test("live pads dispatch digit events with or without a running sequence", 
   assert.equal(app.events[6].key, "1");
 });
 
+Deno.test("live pads seek immediately and resume a paused video", async () => {
+  for (const running of [false, true]) {
+    const app = setup();
+    if (running) app.send("play", { sequence, bpm: 120 });
+    app.video.paused = true;
+    let resolvePlay;
+    let calls = 0;
+    app.video.play = () => {
+      calls++;
+      return new Promise(resolve => { resolvePlay = resolve; });
+    };
+    const eventCount = app.events.length;
+    const response = app.sendAsync("trigger", { key: "9" });
+    assert.equal(calls, 1);
+    assert.equal(app.events[eventCount].key, "9");
+    assert.equal(app.events[eventCount + 1].type, "keyup");
+    resolvePlay();
+    assert.equal((await response).ok, true);
+    assert.equal(app.send("status").playing, running);
+    assert.equal(app.pending(), running ? 1 : 0);
+  }
+});
+
+Deno.test("live pads report failed playback and preserve rapid seek order", async () => {
+  const app = setup();
+  app.video.paused = true;
+  const plays = [];
+  app.video.play = () => new Promise((resolve, reject) => plays.push({ resolve, reject }));
+  const first = app.sendAsync("trigger", { key: "1" });
+  const second = app.sendAsync("trigger", { key: "2" });
+  assert.deepEqual(app.events.filter(event => event.type === "keydown").map(event => event.key), ["1", "2"]);
+  plays[1].resolve();
+  plays[0].reject(new Error("blocked"));
+  assert.equal((await second).ok, true);
+  const failure = await first;
+  assert.equal(failure.ok, false);
+  assert.match(failure.error, /Could not start the video/);
+});
+
+Deno.test("live pads do not restart already playing video", () => {
+  const app = setup();
+  app.video.play = () => { throw new Error("unexpected play"); };
+  assert.equal(app.send("trigger", { key: "5" }).ok, true);
+});
+
 Deno.test("live pads reject invalid digits and missing players", () => {
   const app = setup();
   for (const key of ["", "10", "x", 1, null]) {
@@ -218,6 +392,10 @@ Deno.test("live pads reject invalid digits and missing players", () => {
   app.removePlayer();
   assert.equal(app.send("trigger", { key: "1" }).ok, false);
   assert.equal(app.events.length, 0);
+  const noVideo = setup();
+  noVideo.removeVideo();
+  assert.equal(noVideo.send("trigger", { key: "1" }).ok, false);
+  assert.equal(noVideo.events.length, 0);
   app.navigate("https://www.youtube.com/");
   assert.equal(app.send("trigger", { key: "1" }).ok, false);
 });
@@ -285,7 +463,7 @@ Deno.test("invalid live edits leave the existing pattern and timer intact", () =
   for (const data of [
     { step: -1, value: "1" },
     { step: 8, value: "1" },
-    { step: 1, value: "" },
+    { step: 1, value: "x" },
     { bpm: 0 },
     { bpm: 1000 },
     {}
