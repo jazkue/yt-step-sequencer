@@ -1,5 +1,8 @@
 # youtube step sequencer
 
+<img width="381" height="461" alt="Screenshot 2026-11-13 at 4 32 54 PM" src="https://github.com/user-attachments/assets/3457c908-d487-4757-9767-10f73b695f5a" />
+
+
 ## install
 
 1. Open `chrome://extensions`, enable developer mode, and select **load unpacked**.
