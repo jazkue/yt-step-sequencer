@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube Step Sequencer",
+  "version": "1.0.0",
+  "description": "Secuencia rítmica de saltos por teclado para videos de YouTube.",
+  "permissions": ["activeTab", "storage"],
+  "action": {
+    "default_title": "YouTube Step Sequencer"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://youtube.com/*", "https://www.youtube.com/*"],
+      "js": ["content.js"]
+    }
+  ]
+}

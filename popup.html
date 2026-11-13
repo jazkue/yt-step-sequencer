@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>yt step sequencer</title>
+    <link rel="stylesheet" href="popup.css">
+    <script src="popup.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <h1>yt step sequencer</h1>
+
+      <form id="sequencer" novalidate>
+        <fieldset id="settings">
+          <legend class="sr-only">Sequence</legend>
+          <div class="steps" id="steps"></div>
+          <div class="step-controls">
+            <button id="randomize" type="button">Randomize</button>
+            <button id="next-step" type="button">Next</button>
+          </div>
+        </fieldset>
+        <div class="controls">
+          <div class="tempo">
+            <label for="bpm">BPM</label>
+            <input id="bpm" name="bpm" type="text" inputmode="numeric"
+              maxlength="3" value="120" required pattern="[0-9]+" autocomplete="off"
+              aria-describedby="bpm-range">
+            <span id="bpm-range" class="sr-only">BPM must be between 1 and 999.</span>
+            <button id="bpm-decrease" type="button" aria-label="Decrease BPM" title="Decrease BPM">−</button>
+            <button id="bpm-increase" type="button" aria-label="Increase BPM" title="Increase BPM">+</button>
+          </div>
+          <button id="transport" type="submit" aria-label="Play" title="Play">
+            <svg class="play-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M7 4v16l13-8z"></path>
+            </svg>
+            <svg class="stop-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 5h14v14H5z"></path>
+            </svg>
+          </button>
+        </div>
+      </form>
+      <p id="status" role="status" aria-live="polite"></p>
+      <div id="pads" class="pads" role="group" aria-label="Live pads"></div>
+    </main>
+  </body>
+</html>
