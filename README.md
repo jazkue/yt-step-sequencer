@@ -1,7 +1,6 @@
 # youtube step sequencer
 
-<img width="381" height="461" alt="Screenshot 2026-11-13 at 4 32 54 PM" src="https://github.com/user-attachments/assets/3457c908-d487-4757-9767-10f73b695f5a" />
-
+<img width="413" height="461" alt="Screenshot 2026-11-13 at 6 56 06 PM" src="https://github.com/user-attachments/assets/e41e833b-7c16-45ba-96ae-f6fe67b0ecbd" />
 
 ## install
 
