@@ -10,7 +10,7 @@ function setup() {
   const events = [];
   const handlers = {};
   const location = { href: "https://www.youtube.com/watch?v=first" };
-  const video = { paused: false, muted: false, play: () => Promise.resolve() };
+  const video = { paused: false, muted: false, currentTime: 0, duration: 100, play: () => Promise.resolve() };
   let player = {
     dispatchEvent: event => events.push(event),
     querySelector: selector => selector === "video" ? video : null
@@ -87,6 +87,62 @@ function setup() {
 
 const sequence = ["0", "1", "2", "3", "4", "5", "6", "9"];
 
+Deno.test("pad follows sequenced digits through empty steps and ignores video time and manual pads", () => {
+  const app = setup();
+  const observer = app.connect();
+  app.video.currentTime = 90;
+  app.send("play", { sequence: ["", "2", "", "", "7", "", "", ""], bpm: 120 });
+  assert.equal(observer.updates.at(-1).padValue, null);
+  assert.equal(app.send("status").padValue, null);
+  app.advance(500);
+  assert.equal(observer.updates.at(-1).padValue, "2");
+  app.video.currentTime = 0;
+  app.send("trigger", { key: "9" });
+  app.send("update", { step: 1, value: "5" });
+  app.advance(1000);
+  assert.equal(observer.updates.at(-1).padValue, "2");
+  assert.equal(app.send("status").padValue, "2");
+  app.advance(1500);
+  assert.equal(observer.updates.at(-1).padValue, "2");
+  app.advance(2000);
+  assert.equal(observer.updates.at(-1).padValue, "7");
+  assert.equal(app.send("stop").padValue, null);
+});
+
+Deno.test("an all-empty sequence has no active pad and restarts clear the previous pad", () => {
+  const app = setup();
+  app.send("play", { sequence, bpm: 120 });
+  assert.equal(app.send("status").padValue, "0");
+  app.send("play", { sequence: Array(8).fill(""), bpm: 120 });
+  for (let i = 1; i <= 8; i++) app.advance(i * 500);
+  assert.equal(app.send("status").padValue, null);
+});
+
+Deno.test("clearing the live pattern clears the pad for all observers without restarting", () => {
+  const app = setup();
+  const first = app.connect();
+  const second = app.connect();
+  app.send("play", { sequence, bpm: 120 });
+  app.advance(500);
+  const previous = app.send("status");
+  assert.equal(previous.padValue, "1");
+  const cleared = app.send("update", { sequence: Array(8).fill("") });
+  assert.equal(cleared.playing, true);
+  assert.equal(cleared.currentStep, previous.currentStep);
+  assert.equal(cleared.stepSerial, previous.stepSerial);
+  assert.equal(cleared.bpm, previous.bpm);
+  assert.equal(cleared.padValue, null);
+  assert.equal(first.updates.at(-1).padValue, null);
+  assert.equal(second.updates.at(-1).padValue, null);
+  assert.equal(app.pending(), 1);
+  app.advance(1000);
+  assert.equal(app.send("status").padValue, null);
+  assert.equal(app.events.length, 4);
+  app.send("update", { step: 3, value: "7" });
+  app.advance(1500);
+  assert.equal(app.send("status").padValue, "7");
+});
+
 Deno.test("starting a paused video awaits playback before the first step", async () => {
   const app = setup();
   app.video.paused = true;
@@ -94,6 +150,7 @@ Deno.test("starting a paused video awaits playback before the first step", async
   app.video.play = () => new Promise(resolve => { resolvePlay = resolve; });
   const response = app.sendAsync("play", { sequence, bpm: 120 });
   assert.equal(app.events.length, 0);
+  app.video.paused = false;
   resolvePlay();
   const state = await response;
   assert.equal(state.playing, true);
@@ -110,22 +167,26 @@ Deno.test("already playing video is not restarted", () => {
   assert.equal(calls, 0);
 });
 
-Deno.test("a paused video is muted before starting on a rest and restored on failure or cancellation", async () => {
+Deno.test("starting on an empty step leaves mute unchanged on success, failure and cancellation", async () => {
   for (const outcome of ["play", "reject", "stop", "navigate"]) {
     const app = setup();
     app.video.paused = true;
     let resolvePlay;
     let rejectPlay;
     app.video.play = () => {
-      assert.equal(app.video.muted, true);
+      assert.equal(app.video.muted, false);
       return new Promise((resolve, reject) => { resolvePlay = resolve; rejectPlay = reject; });
     };
     const response = app.sendAsync("play", { sequence: ["", ...sequence.slice(1)], bpm: 120 });
     if (outcome === "stop") app.send("stop");
     if (outcome === "navigate") app.navigate("https://www.youtube.com/watch?v=other");
     if (outcome === "reject") rejectPlay(new Error("blocked"));
-    else resolvePlay();
+    else {
+      app.video.paused = false;
+      resolvePlay();
+    }
     assert.equal((await response).ok, outcome === "play");
+    assert.equal(app.events.length, 0);
     if (outcome === "play") app.send("stop");
     assert.equal(app.video.muted, false);
   }
@@ -157,6 +218,67 @@ Deno.test("stop or navigation cancels a pending video start", async () => {
   }
 });
 
+Deno.test("a paused video resumes during the sequence, including on empty steps", async () => {
+  for (const step of ["1", ""]) {
+    const app = setup();
+    app.send("play", { sequence: ["0", step, ...sequence.slice(2)], bpm: 120 });
+    app.video.paused = true;
+    let calls = 0;
+    let resolvePlay;
+    app.video.play = () => {
+      calls++;
+      return new Promise(resolve => { resolvePlay = resolve; });
+    };
+    app.advance(500);
+    assert.equal(calls, 1);
+    assert.equal(app.events.length, step ? 4 : 2);
+    app.advance(1000);
+    assert.equal(calls, 1);
+    assert.equal(app.send("status").playing, true);
+    app.video.paused = false;
+    resolvePlay();
+    await Promise.resolve();
+    app.advance(1500);
+    assert.equal(calls, 1);
+    assert.equal(app.send("status").currentStep, 3);
+    app.send("stop");
+  }
+});
+
+Deno.test("blocked resumption stops the sequence and reports the error to observers and status", async () => {
+  const app = setup();
+  const observer = app.connect();
+  app.send("play", { sequence, bpm: 120 });
+  app.video.paused = true;
+  app.video.play = () => Promise.reject(new Error("blocked"));
+  app.advance(500);
+  await Promise.resolve();
+  const state = app.send("status");
+  assert.equal(state.playing, false);
+  assert.match(state.playbackError, /Could not start the video/);
+  assert.equal(observer.updates.at(-1).playbackError, state.playbackError);
+  assert.equal(app.pending(), 0);
+  app.video.paused = false;
+  assert.equal(app.send("play", { sequence, bpm: 120 }).playbackError, null);
+});
+
+Deno.test("an old resume failure cannot stop a later sequence", async () => {
+  const app = setup();
+  app.send("play", { sequence, bpm: 120 });
+  app.video.paused = true;
+  let rejectPlay;
+  app.video.play = () => new Promise((_resolve, reject) => { rejectPlay = reject; });
+  app.advance(500);
+  app.send("stop");
+  app.video.paused = false;
+  app.send("play", { sequence, bpm: 120 });
+  rejectPlay(new Error("cancelled"));
+  await Promise.resolve();
+  assert.equal(app.send("status").playing, true);
+  assert.equal(app.send("status").playbackError, null);
+  assert.equal(app.pending(), 1);
+});
+
 Deno.test("plays eight keyboard events at one step per beat and loops", () => {
   const app = setup();
   const state = app.send("play", { sequence, bpm: 120 });
@@ -175,27 +297,28 @@ Deno.test("plays eight keyboard events at one step per beat and loops", () => {
   assert.equal(app.send("status").currentStep, 0);
 });
 
-Deno.test("empty steps mute for a beat, advance normally and restore sound", () => {
+Deno.test("empty steps continue playback without seeking or changing mute", () => {
   const app = setup();
   const observer = app.connect();
   const pattern = ["", "", "2", "", "4", "5", "6", "9"];
   assert.equal(app.send("play", { sequence: pattern, bpm: 120 }).playing, true);
-  assert.equal(app.video.muted, true);
+  assert.equal(app.video.muted, false);
   assert.equal(app.events.length, 0);
   app.advance(500);
-  assert.equal(app.video.muted, true);
+  assert.equal(app.video.muted, false);
   assert.equal(app.events.length, 0);
   app.advance(1000);
   assert.equal(app.video.muted, false);
   assert.equal(app.events[0].key, "2");
   app.advance(1500);
-  assert.equal(app.video.muted, true);
+  assert.equal(app.video.muted, false);
+  assert.equal(app.events.length, 2);
   assert.deepEqual(observer.updates.map(update => update.currentStep), [0, 1, 2, 3]);
   app.send("stop");
   assert.equal(app.video.muted, false);
 });
 
-Deno.test("rests preserve an already muted video and restore on navigation", () => {
+Deno.test("empty steps leave mute settings unchanged during playback and navigation", () => {
   const app = setup();
   app.video.muted = true;
   app.send("play", { sequence: ["", "1", "2", "3", "4", "5", "6", "9"], bpm: 120 });
@@ -205,35 +328,35 @@ Deno.test("rests preserve an already muted video and restore on navigation", () 
   assert.equal(app.video.muted, true);
   app.video.muted = false;
   app.send("play", { sequence: Array(8).fill(""), bpm: 120 });
-  assert.equal(app.video.muted, true);
+  assert.equal(app.video.muted, false);
   app.navigate("https://www.youtube.com/watch?v=other");
   assert.equal(app.video.muted, false);
 });
 
-Deno.test("unmuting during consecutive rests is preserved after the rests", () => {
+Deno.test("mute changes during consecutive empty steps are preserved", () => {
   const app = setup();
   app.video.muted = true;
   app.send("play", { sequence: ["", "", "2", "3", "4", "5", "6", "9"], bpm: 120 });
   app.video.muted = false;
   app.advance(500);
-  assert.equal(app.video.muted, true);
+  assert.equal(app.video.muted, false);
   app.advance(1000);
   assert.equal(app.video.muted, false);
 });
 
-Deno.test("live rests and all-empty pattern keep timing and pad preview working", () => {
+Deno.test("live empty steps and an all-empty pattern keep timing and pads working", () => {
   const app = setup();
   app.send("play", { sequence, bpm: 120 });
   assert.equal(app.send("update", { step: 1, value: "" }).ok, true);
   app.advance(500);
-  assert.equal(app.video.muted, true);
+  assert.equal(app.video.muted, false);
   assert.equal(app.events.length, 2);
   assert.equal(app.send("trigger", { key: "9" }).ok, true);
   assert.equal(app.video.muted, false);
   assert.equal(app.events[2].key, "9");
   assert.equal(app.send("update", { sequence: Array(8).fill("") }).ok, true);
   app.advance(1000);
-  assert.equal(app.video.muted, true);
+  assert.equal(app.video.muted, false);
   assert.equal(app.send("status").currentStep, 2);
   assert.equal(app.pending(), 1);
   app.send("stop");
@@ -264,6 +387,24 @@ Deno.test("step observers receive every dispatched beat, including at 999 BPM", 
   observer.disconnect();
   app.advance(16 * 60000 / 999 + 0.001);
   assert.equal(observer.updates.length, 16);
+});
+
+Deno.test("step events and state carry the executed value, not later edits", () => {
+  const app = setup();
+  const observer = app.connect();
+  app.send("play", { sequence: ["0", "", ...sequence.slice(2)], bpm: 120 });
+  assert.equal(observer.updates[0].stepValue, "0");
+  assert.equal(app.send("status").stepValue, "0");
+  app.send("update", { step: 0, value: "9" });
+  assert.equal(app.send("status").stepValue, "0");
+  app.send("update", { step: 2, value: "8" });
+  app.advance(500);
+  assert.equal(observer.updates[1].stepValue, "");
+  assert.equal(app.send("status").stepValue, "");
+  app.advance(1000);
+  assert.equal(observer.updates[2].stepValue, "8");
+  assert.equal(app.events.at(-1).key, "8");
+  assert.equal(app.send("stop").stepValue, null);
 });
 
 Deno.test("a delayed timer is reported and the counter resets on restart", () => {

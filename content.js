@@ -9,8 +9,12 @@
   let videoId = null;
   let generation = 0;
   let stepSerial = 0;
+  let stepValue = null;
+  let padValue = null;
   let timingDelays = 0;
-  let mutedForRest = null;
+  let playbackError = null;
+  let resumeAttempt = null;
+  const playbackFailure = "Could not start the video. Press play on YouTube and try again.";
   const observers = new Set();
 
   function currentVideoId() {
@@ -20,18 +24,21 @@
 
   function stop() {
     generation++;
-    endRest();
+    resumeAttempt = null;
+    playbackError = null;
     if (timer !== null) clearTimeout(timer);
     timer = null;
     sequence = null;
     bpm = null;
     currentStep = -1;
+    stepValue = null;
+    padValue = null;
     nextStep = 0;
     videoId = null;
   }
 
   function state() {
-    return { playing: sequence !== null, sequence, bpm, currentStep, stepSerial, timingDelays };
+    return { playing: sequence !== null, sequence, bpm, currentStep, stepValue, stepSerial, timingDelays, playbackError, padValue };
   }
 
   chrome.runtime.onConnect.addListener(port => {
@@ -47,23 +54,6 @@
 
   function validStep(value) {
     return typeof value === "string" && /^[0-9]?$/.test(value);
-  }
-
-  function endRest() {
-    if (!mutedForRest) return;
-    if (mutedForRest.video.muted) mutedForRest.video.muted = mutedForRest.wasMuted;
-    mutedForRest = null;
-  }
-
-  function beginRest(video) {
-    if (mutedForRest?.video === video) {
-      if (!video.muted) mutedForRest.wasMuted = false;
-      video.muted = true;
-      return;
-    }
-    endRest();
-    mutedForRest = { video, wasMuted: video.muted };
-    video.muted = true;
   }
 
   function validBpm(value) {
@@ -83,6 +73,36 @@
     player.dispatchEvent(new KeyboardEvent("keyup", options));
   }
 
+  function notifyObservers(message) {
+    for (const port of observers) {
+      try {
+        port.postMessage(message);
+      } catch (error) {
+        observers.delete(port);
+        console.warn("Could not send step update:", error);
+      }
+    }
+  }
+
+  function resumeVideo(video) {
+    if (!video.paused || resumeAttempt) return;
+    const attempt = { generation, video };
+    resumeAttempt = attempt;
+    video.play().then(() => {
+      if (resumeAttempt === attempt) resumeAttempt = null;
+    }, () => {
+      if (resumeAttempt !== attempt || generation !== attempt.generation) return;
+      if (currentVideoId() !== videoId ||
+          document.querySelector(".html5-video-player")?.querySelector("video") !== attempt.video) {
+        stop();
+        return;
+      }
+      stop();
+      playbackError = playbackFailure;
+      notifyObservers(state());
+    });
+  }
+
   function tick() {
     if (!sequence || currentVideoId() !== videoId) {
       stop();
@@ -100,31 +120,24 @@
     if (startTime - nextTime >= interval) timingDelays++;
     currentStep = nextStep;
     nextStep = (nextStep + 1) % sequence.length;
-    if (sequence[currentStep] === "") {
-      beginRest(video);
-    } else {
-      endRest();
-      dispatchDigit(player, sequence[currentStep]);
+    stepValue = sequence[currentStep];
+    if (stepValue !== "") {
+      dispatchDigit(player, stepValue);
+      padValue = stepValue;
     }
     stepSerial++;
-    for (const port of observers) {
-      try {
-        port.postMessage({ currentStep, stepSerial, timingDelays });
-      } catch (error) {
-        observers.delete(port);
-        console.warn("Could not send step update:", error);
-      }
-    }
+    notifyObservers({ currentStep, stepValue, padValue, stepSerial, timingDelays });
     nextTime += interval;
     const now = performance.now();
     if (nextTime - now < interval / 4) {
       nextTime = now + interval;
     }
     timer = setTimeout(tick, Math.max(0, nextTime - now));
+    resumeVideo(video);
   }
 
   document.addEventListener("yt-navigate-finish", () => {
-    if ((sequence && currentVideoId() !== videoId) || (mutedForRest && !sequence)) stop();
+    if (sequence && currentVideoId() !== videoId) stop();
   });
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -156,12 +169,11 @@
         sendResponse({ ok: false, error: "Open a YouTube video and wait for the player to load." });
         return;
       }
-      endRest();
       dispatchDigit(player, message.key);
       if (video.paused) {
         video.play().then(
           () => sendResponse({ ok: true }),
-          () => sendResponse({ ok: false, error: "Could not start the video. Press play on YouTube and try again." })
+          () => sendResponse({ ok: false, error: playbackFailure })
         );
         return true;
       }
@@ -186,7 +198,6 @@
         if (attempt !== generation || currentVideoId() !== id ||
             document.querySelector(".html5-video-player") !== player ||
             player.querySelector("video") !== video) {
-          if (attempt === generation) endRest();
           sendResponse({ ok: false, error: "Playback was cancelled or the video changed." });
           return;
         }
@@ -199,10 +210,8 @@
         sendResponse({ ok: true, ...state() });
       };
       if (video.paused) {
-        if (message.sequence[0] === "") beginRest(video);
         video.play().then(start, () => {
-          if (attempt === generation) endRest();
-          sendResponse({ ok: false, error: "Could not start the video. Press play on YouTube and try again." });
+          sendResponse({ ok: false, error: playbackFailure });
         });
         return true;
       }
@@ -221,6 +230,10 @@
           return;
         }
         sequence = message.sequence.slice();
+        if (sequence.every(value => value === "")) {
+          padValue = null;
+          notifyObservers({ currentStep, stepValue, padValue, stepSerial, timingDelays });
+        }
       } else if (message.step !== undefined) {
         if (!Number.isInteger(message.step) || message.step < 0 || message.step >= sequence.length ||
             !validStep(message.value)) {

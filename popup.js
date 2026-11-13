@@ -54,6 +54,12 @@ for (const key of "1234567890") {
   padButtons.set(key, button);
 }
 
+function updatePadIndicator(value) {
+  for (const [key, button] of padButtons) {
+    button.classList.toggle("current", key === value);
+  }
+}
+
 async function triggerPad(key) {
   const button = padButtons.get(key);
   if (!button || button.disabled) return;
@@ -140,7 +146,8 @@ function replaceSequence(sequence) {
 }
 
 randomizeButton.addEventListener("click", () => {
-  replaceSequence(inputs.map(() => String(Math.floor(Math.random() * 10))));
+  const choices = "0123456789";
+  replaceSequence(inputs.map(() => choices[Math.floor(Math.random() * 11)] ?? ""));
 });
 clearButton.addEventListener("click", () => replaceSequence(inputs.map(() => "")));
 resetButton.addEventListener("click", () => replaceSequence(inputs.map((_, index) => String(index))));
@@ -175,6 +182,7 @@ function updateState(state, hydrate = false) {
   transport.title = playing ? "stop" : "play";
   if (!playing) {
     for (const label of steps.children) label.classList.remove("active");
+    updatePadIndicator(null);
     timing.hidden = true;
   } else {
     updateStepIndicator(state);
@@ -184,11 +192,13 @@ function updateState(state, hydrate = false) {
     bpmInput.value = String(state.bpm);
   }
   markBpmValidity();
-  if (!status.classList.contains("error") || hydrate) showGuidance();
+  if (state.playbackError) showStatus(state.playbackError, true);
+  else if (!status.classList.contains("error") || hydrate) showGuidance();
 }
 
 function updateStepIndicator(state) {
   if (!Number.isInteger(state.stepSerial) || state.stepSerial < lastStepSerial) return;
+  if ("padValue" in state) updatePadIndicator(state.padValue);
   lastStepSerial = state.stepSerial;
   for (const [index, label] of [...steps.children].entries()) {
     label.classList.toggle("active", index === state.currentStep);
@@ -203,7 +213,10 @@ function setUnavailable(message) {
   bpmInput.disabled = true;
   bpmDecrease.disabled = true;
   bpmIncrease.disabled = true;
-  for (const button of padButtons.values()) button.disabled = true;
+  for (const button of padButtons.values()) {
+    button.disabled = true;
+    button.classList.remove("current");
+  }
   transport.disabled = true;
   showStatus(message, true);
 }
@@ -443,7 +456,10 @@ async function initialize() {
     tabId = tab.id;
     const port = chrome.tabs.connect(tabId, { name: `${prefix}steps` });
     port.onMessage.addListener(message => {
-      if (playing && tabId !== null && !transportPending) updateStepIndicator(message);
+      if (tabId === null) return;
+      if (transportPending) return;
+      if (message.playbackError) updateState(message);
+      else if (playing) updateStepIndicator(message);
     });
     port.onDisconnect.addListener(() => {
       if (tabId !== null) {

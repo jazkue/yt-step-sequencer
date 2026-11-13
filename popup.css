@@ -129,4 +129,4 @@ button.playing .stop-icon { display: block; }
   color: var(--ink);
   font: inherit;
 }
-.pads button.active { background: var(--accent); color: var(--ink); }
+.pads button.current, .pads button.active { background: var(--accent); color: var(--ink); }
