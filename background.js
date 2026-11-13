@@ -4,6 +4,13 @@ chrome.action.onClicked.addListener(async tab => {
     return;
   }
   try {
+    const popupUrl = chrome.runtime.getURL(`popup.html?tabId=${tab.id}`);
+    const existing = (await chrome.windows.getAll({ populate: true, windowTypes: ["popup"] }))
+      .find(window => window.tabs?.some(item => item.url === popupUrl));
+    if (existing) {
+      await chrome.windows.update(existing.id, { focused: true });
+      return;
+    }
     const [sourceWindow, displays] = await Promise.all([
       chrome.windows.get(tab.windowId),
       chrome.system.display.getInfo()

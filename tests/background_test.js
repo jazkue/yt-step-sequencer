@@ -3,22 +3,26 @@ import { runInNewContext } from "node:vm";
 
 const source = await Deno.readTextFile(new URL("../background.js", import.meta.url));
 
-function setup({ sourceWindow, displays, create = async () => {} }) {
+function setup({ sourceWindow, displays, create = async () => {}, open = [] }) {
   let handler;
   const windows = [];
   const errors = [];
+  const focused = [];
   runInNewContext(source, {
     chrome: {
       action: { onClicked: { addListener: fn => { handler = fn; } } },
       windows: {
         get: async () => sourceWindow,
+        getAll: async () => open,
+        update: async (id, options) => { focused.push({ id, options }); },
         create: async options => { windows.push(options); await create(options); }
       },
+      runtime: { getURL: path => `chrome-extension://abc/${path}` },
       system: { display: { getInfo: async () => displays } }
     },
     console: { error: (...args) => errors.push(args) }
   });
-  return { handler, windows, errors };
+  return { handler, windows, errors, focused };
 }
 
 const primary = {
@@ -81,4 +85,20 @@ Deno.test("reports window creation errors", async () => {
   await app.handler({});
   await app.handler({ id: 42, windowId: 7 });
   assert.equal(app.errors.length, 2);
+});
+
+Deno.test("focuses the existing sequencer window for the same tab instead of opening another", async () => {
+  const app = setup({
+    sourceWindow: { left: 0, top: 0, width: 800, height: 600 },
+    displays: [primary],
+    open: [
+      { id: 5, tabs: [{ url: "chrome-extension://abc/popup.html?tabId=41" }] },
+      { id: 6, tabs: [{ url: "chrome-extension://abc/popup.html?tabId=42" }] }
+    ]
+  });
+  await app.handler({ id: 42, windowId: 7 });
+  assert.equal(app.windows.length, 0);
+  assert.equal(app.focused.length, 1);
+  assert.equal(app.focused[0].id, 6);
+  assert.equal(app.focused[0].options.focused, true);
 });
