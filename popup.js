@@ -3,6 +3,7 @@ const form = document.querySelector("#sequencer");
 const settings = document.querySelector("#settings");
 const steps = document.querySelector("#steps");
 const randomizeButton = document.querySelector("#randomize");
+const includeEmptyStepsInput = document.querySelector("#include-empty-steps");
 const clearButton = document.querySelector("#clear");
 const resetButton = document.querySelector("#reset");
 const nextStepButton = document.querySelector("#next-step");
@@ -14,7 +15,10 @@ const status = document.querySelector("#status");
 const timing = document.querySelector("#timing");
 const pads = document.querySelector("#pads");
 const connectBox = document.querySelector("#connect");
+const videoTitle = document.querySelector("#video-title");
 const link = document.querySelector("#link");
+const optionsToggle = document.querySelector("#options-toggle");
+const optionsMenu = document.querySelector("#options-menu");
 const flashTimers = new WeakMap();
 let tabId = null;
 let playing = false;
@@ -26,6 +30,24 @@ let bpmTimer = null;
 let transportPending = false;
 let selectedStep = null;
 let lastStepSerial = -1;
+let prohibitedPads = new Set();
+let includeEmptySteps = true;
+
+function setOptionsOpen(open) {
+  optionsMenu.hidden = !open;
+  optionsToggle.setAttribute("aria-expanded", String(open));
+}
+
+optionsToggle.addEventListener("click", () => {
+  setOptionsOpen(optionsMenu.hidden);
+});
+
+document.addEventListener("pointerdown", event => {
+  if (!optionsMenu.hidden && !optionsMenu.contains(event.target) &&
+      !optionsToggle.contains(event.target)) {
+    setOptionsOpen(false);
+  }
+});
 
 for (let index = 0; index < 8; index++) {
   const label = document.createElement("label");
@@ -44,11 +66,15 @@ for (let index = 0; index < 8; index++) {
 
 const inputs = [...steps.querySelectorAll("input")];
 const padButtons = new Map();
+const prohibitedButtons = new Map();
 const padTimers = new Map();
 
 for (const key of "1234567890") {
+  const pad = document.createElement("div");
+  pad.className = "pad";
   const button = document.createElement("button");
   button.type = "button";
+  button.className = "pad-play";
   button.textContent = key;
   button.setAttribute("aria-label", `play ${key}`);
   button.disabled = true;
@@ -58,8 +84,19 @@ for (const key of "1234567890") {
     event.dataTransfer.setData("application/x-yt-pad", key);
     event.dataTransfer.effectAllowed = "copy";
   });
-  pads.append(button);
+  const prohibited = document.createElement("button");
+  prohibited.type = "button";
+  prohibited.className = "prohibit-toggle";
+  prohibited.setAttribute("aria-label", `prohibit pad ${key}`);
+  prohibited.setAttribute("aria-pressed", "false");
+  prohibited.title = `prohibit pad ${key}`;
+  prohibited.disabled = true;
+  prohibited.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M5.6 5.6l12.8 12.8"></path></svg>';
+  prohibited.addEventListener("click", () => toggleProhibitedPad(key));
+  pad.append(button, prohibited);
+  pads.append(pad);
   padButtons.set(key, button);
+  prohibitedButtons.set(key, prohibited);
 }
 
 function flash(button) {
@@ -88,26 +125,67 @@ connectBox.addEventListener("change", () => {
   }
 });
 
+includeEmptyStepsInput.addEventListener("change", () => {
+  includeEmptySteps = includeEmptyStepsInput.checked;
+  enqueue(async () => {
+    try {
+      await chrome.storage.local.set({ includeEmptySteps });
+      if (playing) await send("update", { includeEmptySteps });
+    } catch (error) {
+      showStatus(error.message || "could not update randomization settings.", true);
+    }
+  });
+});
+
 function updatePadIndicator(value) {
   for (const [key, button] of padButtons) {
     button.classList.toggle("current", key === value);
   }
 }
 
+function updateProhibitedPadControls() {
+  for (const [key, button] of prohibitedButtons) {
+    const prohibited = prohibitedPads.has(key);
+    button.setAttribute("aria-pressed", String(prohibited));
+    button.setAttribute("aria-label", `${prohibited ? "allow" : "prohibit"} pad ${key}`);
+    button.title = `${prohibited ? "allow" : "prohibit"} pad ${key}`;
+    button.parentElement.classList.toggle("pad-prohibited", prohibited);
+  }
+}
+
+function toggleProhibitedPad(key) {
+  if (prohibitedPads.has(key)) prohibitedPads.delete(key);
+  else prohibitedPads.add(key);
+  updateProhibitedPadControls();
+  const value = [...prohibitedPads];
+  enqueue(async () => {
+    try {
+      const updates = [chrome.storage.local.set({ prohibitedPads: value })];
+      if (tabId !== null) updates.push(send("prohibited", { prohibitedPads: value }));
+      const results = await Promise.allSettled(updates);
+      const failure = results.find(result => result.status === "rejected");
+      if (failure) throw failure.reason;
+    } catch (error) {
+      showStatus(error.message || "could not update prohibited pads.", true);
+    }
+  });
+}
+
 async function triggerPad(key) {
   const button = padButtons.get(key);
   if (!button || button.disabled) return;
+  if (selectedStep !== null) {
+    const input = inputs[selectedStep];
+    input.value = key;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  if (prohibitedPads.has(key)) return;
   button.classList.add("active");
   clearTimeout(padTimers.get(key));
   padTimers.set(key, setTimeout(() => {
     button.classList.remove("active");
     padTimers.delete(key);
   }, 150));
-  if (selectedStep !== null) {
-    const input = inputs[selectedStep];
-    input.value = key;
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-  }
   try {
     await send("trigger", { key });
   } catch (error) {
@@ -117,6 +195,13 @@ async function triggerPad(key) {
 
 document.addEventListener("keydown", event => {
   if (event.repeat || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+  if (event.key === "Escape" && !optionsMenu.hidden) {
+    event.preventDefault();
+    setOptionsOpen(false);
+    optionsToggle.focus();
+    return;
+  }
+  if (optionsMenu.contains(event.target) || event.target === optionsToggle) return;
   if (event.key === "Enter" && selectedStep !== null &&
       event.target !== bpmInput && event.target !== nextStepButton &&
       event.target !== randomizeButton &&
@@ -197,6 +282,13 @@ function validStep(value) {
   return typeof value === "string" && /^[0-9]?$/.test(value);
 }
 
+function randomSequence() {
+  const choices = [..."0123456789"].filter(key => !prohibitedPads.has(key));
+  if (includeEmptySteps) choices.push("");
+  if (choices.length === 0) return null;
+  return inputs.map(() => choices[Math.floor(Math.random() * choices.length)]);
+}
+
 function replaceSequence(sequence) {
   inputs.forEach((input, index) => { input.value = sequence[index]; });
   enqueue(async () => {
@@ -219,8 +311,12 @@ function replaceSequence(sequence) {
 
 randomizeButton.addEventListener("click", () => {
   flash(randomizeButton);
-  const choices = "0123456789";
-  replaceSequence(inputs.map(() => choices[Math.floor(Math.random() * 11)] ?? ""));
+  const sequence = randomSequence();
+  if (!sequence) {
+    showStatus("cannot randomize: all pads are prohibited and empty steps are excluded.", true);
+    return;
+  }
+  replaceSequence(sequence);
 });
 clearButton.addEventListener("click", () => replaceSequence(inputs.map(() => "")));
 resetButton.addEventListener("click", () => replaceSequence(inputs.map((_, index) => String(index))));
@@ -249,6 +345,17 @@ function updateState(state, hydrate = false) {
   bpmDecrease.disabled = false;
   bpmIncrease.disabled = false;
   for (const button of padButtons.values()) button.disabled = false;
+  for (const button of prohibitedButtons.values()) button.disabled = false;
+  optionsToggle.disabled = false;
+  includeEmptyStepsInput.disabled = false;
+  if (playing && typeof state.includeEmptySteps === "boolean") {
+    includeEmptySteps = state.includeEmptySteps;
+    includeEmptyStepsInput.checked = includeEmptySteps;
+  }
+  if (Array.isArray(state.prohibitedPads)) {
+    prohibitedPads = new Set(state.prohibitedPads);
+    updateProhibitedPadControls();
+  }
   transport.disabled = transportPending;
   transport.classList.toggle("playing", playing);
   transport.setAttribute("aria-label", playing ? "stop" : "play");
@@ -296,6 +403,9 @@ function setUnavailable(message) {
     button.disabled = true;
     button.classList.remove("current");
   }
+  for (const button of prohibitedButtons.values()) button.disabled = true;
+  optionsToggle.disabled = true;
+  includeEmptyStepsInput.disabled = true;
   transport.disabled = true;
   showStatus(message, true);
 }
@@ -480,17 +590,24 @@ form.addEventListener("submit", async event => {
   transportPending = true;
   transport.disabled = true;
   settings.disabled = true;
+  optionsToggle.disabled = true;
+  includeEmptyStepsInput.disabled = true;
   bpmInput.disabled = true;
   bpmDecrease.disabled = true;
   bpmIncrease.disabled = true;
   await enqueue(async () => {
     try {
       await chrome.storage.local.set({ sequence, bpm });
-      const state = await send("play", { sequence, bpm, randomize: connectBox.checked });
+      const state = await send("play", {
+        sequence, bpm, randomize: connectBox.checked, prohibitedPads: [...prohibitedPads],
+        includeEmptySteps
+      });
       status.classList.remove("error");
       updateState(state);
     } catch (error) {
       settings.disabled = false;
+      optionsToggle.disabled = false;
+      includeEmptyStepsInput.disabled = false;
       bpmInput.disabled = false;
       bpmDecrease.disabled = false;
       bpmIncrease.disabled = false;
@@ -498,6 +615,8 @@ form.addEventListener("submit", async event => {
     } finally {
       transportPending = false;
       transport.disabled = false;
+      optionsToggle.disabled = false;
+      includeEmptyStepsInput.disabled = false;
     }
   });
 });
@@ -505,8 +624,16 @@ form.addEventListener("submit", async event => {
 async function initialize() {
   setUnavailable("connecting to youtube...");
   try {
-    const saved = await chrome.storage.local.get(["sequence", "bpm", "randomize"]);
+    const saved = await chrome.storage.local.get([
+      "sequence", "bpm", "randomize", "prohibitedPads", "includeEmptySteps"
+    ]);
     setConnected(saved.randomize === true);
+    includeEmptySteps = saved.includeEmptySteps !== false;
+    includeEmptyStepsInput.checked = includeEmptySteps;
+    prohibitedPads = new Set(Array.isArray(saved.prohibitedPads)
+      ? saved.prohibitedPads.filter(key => typeof key === "string" && /^[0-9]$/.test(key))
+      : []);
+    updateProhibitedPadControls();
     if (Array.isArray(saved.sequence) && saved.sequence.length === 8 &&
         saved.sequence.every(validStep)) {
       inputs.forEach((input, index) => { input.value = saved.sequence[index]; });
@@ -534,6 +661,9 @@ async function initialize() {
       return;
     }
     tabId = tab.id;
+    videoTitle.textContent = (tab.title || "").replace(/^\(\d+\)\s*/, "").replace(/ - youtube$/i, "").toLowerCase();
+    videoTitle.title = videoTitle.textContent;
+    await send("prohibited", { prohibitedPads: [...prohibitedPads] });
     const port = chrome.tabs.connect(tabId, { name: `${prefix}steps` });
     port.onMessage.addListener(message => {
       if (tabId === null) return;

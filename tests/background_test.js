@@ -7,14 +7,14 @@ function setup({ sourceWindow, displays, create = async () => {}, open = [] }) {
   let handler;
   const windows = [];
   const errors = [];
-  const focused = [];
+  const removed = [];
   runInNewContext(source, {
     chrome: {
       action: { onClicked: { addListener: fn => { handler = fn; } } },
       windows: {
         get: async () => sourceWindow,
         getAll: async () => open,
-        update: async (id, options) => { focused.push({ id, options }); },
+        remove: async id => { removed.push(id); },
         create: async options => { windows.push(options); await create(options); }
       },
       runtime: { getURL: path => `chrome-extension://abc/${path}` },
@@ -22,7 +22,7 @@ function setup({ sourceWindow, displays, create = async () => {}, open = [] }) {
     },
     console: { error: (...args) => errors.push(args) }
   });
-  return { handler, windows, errors, focused };
+  return { handler, windows, errors, removed };
 }
 
 const primary = {
@@ -46,9 +46,9 @@ Deno.test("centers the sequencer in the video tab's display work area", async ()
   const result = app.windows[0];
   assert.equal(result.url, "popup.html?tabId=42");
   assert.equal(result.type, "popup");
-  assert.equal(result.width, 380);
+  assert.equal(result.width, 412);
   assert.equal(result.height, 460);
-  assert.equal(result.left, -1150);
+  assert.equal(result.left, -1166);
   assert.equal(result.top, 300);
   assert.equal(app.errors.length, 0);
 });
@@ -59,7 +59,7 @@ Deno.test("uses primary display when window center is outside known displays", a
     displays: [second, primary]
   });
   await app.handler({ id: 1, windowId: 7 });
-  assert.equal(app.windows[0].left, 530);
+  assert.equal(app.windows[0].left, 514);
   assert.equal(app.windows[0].top, 213);
 });
 
@@ -87,7 +87,7 @@ Deno.test("reports window creation errors", async () => {
   assert.equal(app.errors.length, 2);
 });
 
-Deno.test("focuses the existing sequencer window for the same tab instead of opening another", async () => {
+Deno.test("closes the existing sequencer window for the same tab and opens a fresh one", async () => {
   const app = setup({
     sourceWindow: { left: 0, top: 0, width: 800, height: 600 },
     displays: [primary],
@@ -97,8 +97,6 @@ Deno.test("focuses the existing sequencer window for the same tab instead of ope
     ]
   });
   await app.handler({ id: 42, windowId: 7 });
-  assert.equal(app.windows.length, 0);
-  assert.equal(app.focused.length, 1);
-  assert.equal(app.focused[0].id, 6);
-  assert.equal(app.focused[0].options.focused, true);
+  assert.deepEqual(app.removed, [6]);
+  assert.equal(app.windows.length, 1);
 });

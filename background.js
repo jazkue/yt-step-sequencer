@@ -8,8 +8,7 @@ chrome.action.onClicked.addListener(async tab => {
     const existing = (await chrome.windows.getAll({ populate: true, windowTypes: ["popup"] }))
       .find(window => window.tabs?.some(item => item.url === popupUrl));
     if (existing) {
-      await chrome.windows.update(existing.id, { focused: true });
-      return;
+      await chrome.windows.remove(existing.id);
     }
     const [sourceWindow, displays] = await Promise.all([
       chrome.windows.get(tab.windowId),
@@ -27,7 +26,7 @@ chrome.action.onClicked.addListener(async tab => {
     ) || displays.find(display => display.isPrimary);
     if (!display) throw new Error("Could not determine the display.");
     const area = display.workArea;
-    const width = Math.min(380, area.width);
+    const width = Math.min(412, area.width);
     const height = Math.min(460, area.height);
     await chrome.windows.create({
       url: `popup.html?tabId=${tab.id}`,

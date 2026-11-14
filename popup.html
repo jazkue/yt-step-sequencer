@@ -9,7 +9,24 @@
   </head>
   <body>
     <main>
-      <h1>yt step sequencer</h1>
+      <div class="header">
+        <h1>yt step sequencer</h1>
+        <div class="options">
+          <button id="options-toggle" type="button" aria-label="randomization options"
+            aria-expanded="false" aria-controls="options-menu" title="randomization options">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 7h16l-8 13z"></path>
+            </svg>
+          </button>
+          <div id="options-menu" hidden>
+            <label>
+              <input id="include-empty-steps" type="checkbox">
+              empty steps when randomizing
+            </label>
+          </div>
+        </div>
+      </div>
+      <p id="video-title"></p>
 
       <form id="sequencer" novalidate>
         <fieldset id="settings">

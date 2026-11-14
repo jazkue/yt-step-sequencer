@@ -3,7 +3,7 @@ import { runInNewContext } from "node:vm";
 
 const source = await Deno.readTextFile(new URL("../content.js", import.meta.url));
 
-function setup() {
+function setup({ random = Math.random } = {}) {
   let now = 0;
   let timerId = 0;
   const timers = new Map();
@@ -25,8 +25,10 @@ function setup() {
     }
   }
 
+  const math = Object.create(Math);
+  math.random = random;
   runInNewContext(source, {
-    URL, location, KeyboardEvent,
+    URL, location, KeyboardEvent, Math: math,
     performance: { now: () => now },
     document: {
       querySelector: () => player,
@@ -633,4 +635,74 @@ Deno.test("randomize on step 1 reshuffles the sequence each loop", () => {
   assert.equal(observer.updates.at(-1).currentStep, 0);
   assert.equal(observer.updates.at(-1).randomized, undefined);
   app.send("stop");
+});
+
+Deno.test("prohibited pads cannot be triggered or played by the sequence", () => {
+  const app = setup();
+  assert.equal(app.send("prohibited", { prohibitedPads: ["1"] }).ok, true);
+  assert.equal(app.send("trigger", { key: "1" }).ok, false);
+  assert.equal(app.events.length, 0);
+  app.send("play", { sequence: ["1", "2", "", "3", "4", "5", "6", "9"], bpm: 120 });
+  assert.equal(app.events.length, 0);
+  app.advance(500);
+  assert.equal(app.events[0].key, "2");
+  assert.equal(app.events.some(event => event.key === "1"), false);
+});
+
+Deno.test("prohibiting the currently active pad mutes it immediately during playback", () => {
+  const app = setup();
+  const observer = app.connect();
+  app.send("play", { sequence, bpm: 120 });
+  assert.equal(app.send("status").padValue, "0");
+  app.send("prohibited", { prohibitedPads: ["0"] });
+  assert.equal(app.send("status").padValue, null);
+  assert.equal(observer.updates.at(-1).padValue, null);
+  app.advance(500);
+  assert.equal(app.events.at(-2).key, "1");
+});
+
+Deno.test("prohibited pads are excluded from loop randomization", () => {
+  const app = setup({ random: () => 0 });
+  const observer = app.connect();
+  const state = app.send("play", {
+    sequence: Array(8).fill("1"), bpm: 120, randomize: true, prohibitedPads: ["0", "1"]
+  });
+  assert.equal(state.sequence.every(key => key === "2"), true);
+  assert.equal(observer.updates[0].sequence.every(key => key === "2"), true);
+  app.send("stop");
+});
+
+Deno.test("loop randomization includes empty steps only when enabled", () => {
+  const withEmptySteps = setup({ random: () => 0.999 });
+  const included = withEmptySteps.send("play", {
+    sequence: Array(8).fill("1"), bpm: 120, randomize: true, includeEmptySteps: true
+  });
+  assert.equal(included.sequence.every(value => value === ""), true);
+  withEmptySteps.send("stop");
+
+  const withoutEmptySteps = setup({ random: () => 0.999 });
+  const excluded = withoutEmptySteps.send("play", {
+    sequence: Array(8).fill("1"), bpm: 120, randomize: true, includeEmptySteps: false
+  });
+  assert.equal(excluded.sequence.every(value => value === "9"), true);
+  withoutEmptySteps.send("stop");
+});
+
+Deno.test("include-empty setting updates live loop randomization", () => {
+  const app = setup({ random: () => 0.999 });
+  app.send("play", { sequence: Array(8).fill("1"), bpm: 120, randomize: true });
+  assert.equal(app.send("status").sequence.every(value => value === ""), true);
+  assert.equal(app.send("update", { includeEmptySteps: false }).ok, true);
+  for (let step = 1; step <= 8; step++) app.advance(step * 500);
+  assert.equal(app.send("status").sequence.every(value => value === "9"), true);
+  app.send("stop");
+});
+
+Deno.test("prohibited pad lists reject invalid values without changing current settings", () => {
+  const app = setup();
+  app.send("prohibited", { prohibitedPads: ["2"] });
+  for (const prohibitedPads of [["x"], ["2", "2"], Array(11).fill("2"), "2"]) {
+    assert.equal(app.send("prohibited", { prohibitedPads }).ok, false);
+  }
+  assert.deepEqual([...app.send("status").prohibitedPads], ["2"]);
 });

@@ -11,6 +11,8 @@
   let stepSerial = 0;
   let stepValue = null;
   let randomizeOnStart = false;
+  let prohibitedPads = [];
+  let includeEmptySteps = true;
   let padValue = null;
   let timingDelays = 0;
   let playbackError = null;
@@ -40,7 +42,7 @@
   }
 
   function state() {
-    return { playing: sequence !== null, sequence, bpm, currentStep, stepValue, stepSerial, timingDelays, playbackError, padValue, randomizeOnStart };
+    return { playing: sequence !== null, sequence, bpm, currentStep, stepValue, stepSerial, timingDelays, playbackError, padValue, randomizeOnStart, prohibitedPads, includeEmptySteps };
   }
 
   chrome.runtime.onConnect.addListener(port => {
@@ -60,6 +62,27 @@
 
   function validBpm(value) {
     return Number.isInteger(value) && value >= 1 && value <= 999;
+  }
+
+  function validProhibitedPads(value) {
+    return Array.isArray(value) && value.length <= 10 &&
+      value.every(key => typeof key === "string" && /^[0-9]$/.test(key)) &&
+      new Set(value).size === value.length;
+  }
+
+  function setProhibitedPads(value) {
+    prohibitedPads = value.slice();
+    if (prohibitedPads.includes(padValue)) {
+      padValue = null;
+      notifyObservers({ currentStep, stepValue, padValue, stepSerial, timingDelays });
+    }
+  }
+
+  function randomSequence() {
+    const choices = [..."0123456789"].filter(key => !prohibitedPads.includes(key));
+    if (includeEmptySteps) choices.push("");
+    if (choices.length === 0) return null;
+    return sequence.map(() => choices[Math.floor(Math.random() * choices.length)]);
   }
 
   function dispatchDigit(player, key) {
@@ -122,10 +145,11 @@
     if (startTime - nextTime >= interval) timingDelays++;
     currentStep = nextStep;
     nextStep = (nextStep + 1) % sequence.length;
-    const randomized = randomizeOnStart && currentStep === 0;
-    if (randomized) sequence = sequence.map(() => "0123456789"[Math.floor(Math.random() * 11)] ?? "");
+    const randomizedSequence = randomizeOnStart && currentStep === 0 ? randomSequence() : null;
+    const randomized = randomizedSequence !== null;
+    if (randomized) sequence = randomizedSequence;
     stepValue = sequence[currentStep];
-    if (stepValue !== "") {
+    if (stepValue !== "" && !prohibitedPads.includes(stepValue)) {
       dispatchDigit(player, stepValue);
       padValue = stepValue;
     }
@@ -162,9 +186,22 @@
       sendResponse({ ok: true, ...state() });
       return;
     }
+    if (message.type === `${MESSAGE_PREFIX}prohibited`) {
+      if (!validProhibitedPads(message.prohibitedPads)) {
+        sendResponse({ ok: false, error: "Prohibited pads must be unique digits from 0 to 9." });
+        return;
+      }
+      setProhibitedPads(message.prohibitedPads);
+      sendResponse({ ok: true, ...state() });
+      return;
+    }
     if (message.type === `${MESSAGE_PREFIX}trigger`) {
       if (typeof message.key !== "string" || !/^[0-9]$/.test(message.key)) {
         sendResponse({ ok: false, error: "Enter a digit from 0 to 9." });
+        return;
+      }
+      if (prohibitedPads.includes(message.key)) {
+        sendResponse({ ok: false, error: "This pad is prohibited." });
         return;
       }
       const player = document.querySelector(".html5-video-player");
@@ -196,6 +233,16 @@
         sendResponse({ ok: false, error: "Steps must be empty or a digit from 0 to 9, and BPM must be from 1 to 999." });
         return;
       }
+      if (message.prohibitedPads !== undefined && !validProhibitedPads(message.prohibitedPads)) {
+        sendResponse({ ok: false, error: "Prohibited pads must be unique digits from 0 to 9." });
+        return;
+      }
+      if (message.includeEmptySteps !== undefined && typeof message.includeEmptySteps !== "boolean") {
+        sendResponse({ ok: false, error: "Include-empty-steps setting must be true or false." });
+        return;
+      }
+      if (message.prohibitedPads !== undefined) setProhibitedPads(message.prohibitedPads);
+      if (message.includeEmptySteps !== undefined) includeEmptySteps = message.includeEmptySteps;
       stop();
       const attempt = generation;
       const start = () => {
@@ -246,6 +293,18 @@
           return;
         }
         sequence[message.step] = message.value;
+      } else if (message.prohibitedPads !== undefined) {
+        if (!validProhibitedPads(message.prohibitedPads)) {
+          sendResponse({ ok: false, error: "Prohibited pads must be unique digits from 0 to 9." });
+          return;
+        }
+        setProhibitedPads(message.prohibitedPads);
+      } else if (message.includeEmptySteps !== undefined) {
+        if (typeof message.includeEmptySteps !== "boolean") {
+          sendResponse({ ok: false, error: "Include-empty-steps setting must be true or false." });
+          return;
+        }
+        includeEmptySteps = message.includeEmptySteps;
       } else if (message.randomize !== undefined) {
         randomizeOnStart = message.randomize === true;
       } else if (message.bpm !== undefined) {

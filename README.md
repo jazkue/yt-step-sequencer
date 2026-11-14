@@ -11,5 +11,5 @@
 
 - Set eight steps to digits `0–9` or leave them empty to continue playback without a jump. Set the bpm and press play.
 - Click pads or use number keys to play live. The highlighted pad shows the last digit played by the sequencer, including through empty steps. Select a step to assign a pad; use **step** or Enter to advance, and Escape to deselect.
-- Use **randomize** (includes empty steps), **clear**, or **reset** to change the pattern. Steps and bpm can be edited during playback.
+- Use the small prohibited icon on a pad to mute it and exclude it from playback and randomization. The **empty steps when randomizing** checkbox controls whether **randomize** can add empty steps. Use **clear** or **reset** to change the pattern. Steps and bpm can be edited during playback.
 - If playback is blocked, reload YouTube and try again.
