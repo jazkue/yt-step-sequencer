@@ -13,6 +13,10 @@
   let randomizeOnStart = false;
   let prohibitedPads = [];
   let includeEmptySteps = true;
+  let recordedPadTimes = {};
+  let randomizePadTimecodes = false;
+  let padTimesSerial = 0;
+  let padRandomizeError = null;
   let padValue = null;
   let timingDelays = 0;
   let playbackError = null;
@@ -42,7 +46,15 @@
   }
 
   function state() {
-    return { playing: sequence !== null, sequence, bpm, currentStep, stepValue, stepSerial, timingDelays, playbackError, padValue, randomizeOnStart, prohibitedPads, includeEmptySteps };
+    const video = document.querySelector(".html5-video-player")?.querySelector("video");
+    const duration = video?.duration;
+    return {
+      playing: sequence !== null, sequence, bpm, currentStep, stepValue, stepSerial,
+      timingDelays, playbackError, padValue, randomizeOnStart, prohibitedPads,
+      includeEmptySteps, recordedPadTimes, padTimesSerial, padRandomizeError,
+      randomizePadTimecodes, videoId: currentVideoId(),
+      videoDuration: Number.isFinite(duration) && duration >= 0 ? duration : null
+    };
   }
 
   chrome.runtime.onConnect.addListener(port => {
@@ -52,7 +64,7 @@
   });
 
   function validSequence(value) {
-    return Array.isArray(value) && value.length === 8 &&
+    return Array.isArray(value) && value.length > 0 &&
       value.every(validStep);
   }
 
@@ -68,6 +80,13 @@
     return Array.isArray(value) && value.length <= 10 &&
       value.every(key => typeof key === "string" && /^[0-9]$/.test(key)) &&
       new Set(value).size === value.length;
+  }
+
+  function validRecordedPadTimes(value) {
+    return value !== null && typeof value === "object" && !Array.isArray(value) &&
+      Object.entries(value).every(([key, timecode]) =>
+        /^[0-9]$/.test(key) && Number.isFinite(timecode) && timecode >= 0
+      );
   }
 
   function setProhibitedPads(value) {
@@ -148,13 +167,35 @@
     const randomizedSequence = randomizeOnStart && currentStep === 0 ? randomSequence() : null;
     const randomized = randomizedSequence !== null;
     if (randomized) sequence = randomizedSequence;
+    let randomizedPadTimes;
+    if (randomized && randomizePadTimecodes) {
+      if (Number.isFinite(video.duration) && video.duration >= 0) {
+        recordedPadTimes = Object.fromEntries([..."0123456789"].map(key =>
+          [key, Math.random() * video.duration]
+        ));
+        randomizedPadTimes = recordedPadTimes;
+        padTimesSerial++;
+        padRandomizeError = null;
+      } else {
+        padRandomizeError = "Cannot randomize pad timecodes until the video duration is available.";
+      }
+    }
     stepValue = sequence[currentStep];
     if (stepValue !== "" && !prohibitedPads.includes(stepValue)) {
-      dispatchDigit(player, stepValue);
+      if (Object.prototype.hasOwnProperty.call(recordedPadTimes, stepValue)) {
+        video.currentTime = recordedPadTimes[stepValue];
+      } else {
+        dispatchDigit(player, stepValue);
+      }
       padValue = stepValue;
     }
     stepSerial++;
-    notifyObservers({ currentStep, stepValue, padValue, stepSerial, timingDelays, ...(randomized && { sequence, randomized }) });
+    notifyObservers({
+      currentStep, stepValue, padValue, stepSerial, timingDelays,
+      ...(randomized && { sequence, randomized }),
+      ...(randomizedPadTimes && { recordedPadTimes: randomizedPadTimes, padTimesSerial, videoId }),
+      ...(randomized && randomizePadTimecodes && { padRandomizeError })
+    });
     nextTime += interval;
     const now = performance.now();
     if (nextTime - now < interval / 4) {
@@ -188,11 +229,24 @@
     }
     if (message.type === `${MESSAGE_PREFIX}prohibited`) {
       if (!validProhibitedPads(message.prohibitedPads)) {
-        sendResponse({ ok: false, error: "Prohibited pads must be unique digits from 0 to 9." });
+        sendResponse({ ok: false, error: "Forbidden pads must be unique digits from 0 to 9." });
         return;
       }
       setProhibitedPads(message.prohibitedPads);
       sendResponse({ ok: true, ...state() });
+      return;
+    }
+    if (message.type === `${MESSAGE_PREFIX}record`) {
+      if (typeof message.key !== "string" || !/^[0-9]$/.test(message.key)) {
+        sendResponse({ ok: false, error: "Enter a digit from 0 to 9." });
+        return;
+      }
+      const video = document.querySelector(".html5-video-player")?.querySelector("video");
+      if (!currentVideoId() || !video || !Number.isFinite(video.currentTime)) {
+        sendResponse({ ok: false, error: "The video time is not available yet." });
+        return;
+      }
+      sendResponse({ ok: true, timecode: video.currentTime });
       return;
     }
     if (message.type === `${MESSAGE_PREFIX}trigger`) {
@@ -201,7 +255,12 @@
         return;
       }
       if (prohibitedPads.includes(message.key)) {
-        sendResponse({ ok: false, error: "This pad is prohibited." });
+        sendResponse({ ok: false, error: "This pad is forbidden." });
+        return;
+      }
+      if (message.timecode !== undefined &&
+          (!Number.isFinite(message.timecode) || message.timecode < 0)) {
+        sendResponse({ ok: false, error: "Enter a valid timecode." });
         return;
       }
       const player = document.querySelector(".html5-video-player");
@@ -210,7 +269,9 @@
         sendResponse({ ok: false, error: "Open a YouTube video and wait for the player to load." });
         return;
       }
-      dispatchDigit(player, message.key);
+      const timecode = message.timecode;
+      if (timecode !== undefined) video.currentTime = timecode;
+      else dispatchDigit(player, message.key);
       if (video.paused) {
         video.play().then(
           () => sendResponse({ ok: true }),
@@ -234,15 +295,26 @@
         return;
       }
       if (message.prohibitedPads !== undefined && !validProhibitedPads(message.prohibitedPads)) {
-        sendResponse({ ok: false, error: "Prohibited pads must be unique digits from 0 to 9." });
+        sendResponse({ ok: false, error: "Forbidden pads must be unique digits from 0 to 9." });
+        return;
+      }
+      if (message.recordedPadTimes !== undefined && !validRecordedPadTimes(message.recordedPadTimes)) {
+        sendResponse({ ok: false, error: "Recorded pad timecodes must be valid non-negative times." });
         return;
       }
       if (message.includeEmptySteps !== undefined && typeof message.includeEmptySteps !== "boolean") {
         sendResponse({ ok: false, error: "Include-empty-steps setting must be true or false." });
         return;
       }
+      if (message.randomizePadTimecodes !== undefined && typeof message.randomizePadTimecodes !== "boolean") {
+        sendResponse({ ok: false, error: "Pad randomization setting must be true or false." });
+        return;
+      }
       if (message.prohibitedPads !== undefined) setProhibitedPads(message.prohibitedPads);
+      if (message.recordedPadTimes !== undefined) recordedPadTimes = { ...message.recordedPadTimes };
       if (message.includeEmptySteps !== undefined) includeEmptySteps = message.includeEmptySteps;
+      randomizePadTimecodes = message.randomizePadTimecodes === true;
+      padRandomizeError = null;
       stop();
       const attempt = generation;
       const start = () => {
@@ -281,7 +353,11 @@
           sendResponse({ ok: false, error: "Steps must be empty or a digit from 0 to 9." });
           return;
         }
+        const previousLength = sequence.length;
         sequence = message.sequence.slice();
+        if (sequence.length !== previousLength) {
+          nextStep = currentStep >= sequence.length ? 0 : (currentStep + 1) % sequence.length;
+        }
         if (sequence.every(value => value === "")) {
           padValue = null;
           notifyObservers({ currentStep, stepValue, padValue, stepSerial, timingDelays });
@@ -295,7 +371,7 @@
         sequence[message.step] = message.value;
       } else if (message.prohibitedPads !== undefined) {
         if (!validProhibitedPads(message.prohibitedPads)) {
-          sendResponse({ ok: false, error: "Prohibited pads must be unique digits from 0 to 9." });
+          sendResponse({ ok: false, error: "Forbidden pads must be unique digits from 0 to 9." });
           return;
         }
         setProhibitedPads(message.prohibitedPads);
@@ -305,6 +381,19 @@
           return;
         }
         includeEmptySteps = message.includeEmptySteps;
+      } else if (message.recordedPadTimes !== undefined) {
+        if (!validRecordedPadTimes(message.recordedPadTimes)) {
+          sendResponse({ ok: false, error: "Recorded pad timecodes must be valid non-negative times." });
+          return;
+        }
+        recordedPadTimes = { ...message.recordedPadTimes };
+      } else if (message.randomizePadTimecodes !== undefined) {
+        if (typeof message.randomizePadTimecodes !== "boolean") {
+          sendResponse({ ok: false, error: "Pad randomization setting must be true or false." });
+          return;
+        }
+        randomizePadTimecodes = message.randomizePadTimecodes;
+        padRandomizeError = null;
       } else if (message.randomize !== undefined) {
         randomizeOnStart = message.randomize === true;
       } else if (message.bpm !== undefined) {

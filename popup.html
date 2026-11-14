@@ -28,48 +28,67 @@
       </div>
       <p id="video-title"></p>
 
-      <form id="sequencer" novalidate>
-        <fieldset id="settings">
-          <legend class="sr-only">sequence</legend>
-          <div class="steps" id="steps"></div>
-          <div class="link" id="link">
-            <svg viewBox="0 0 16 42" aria-hidden="true">
-              <path d="M16 1H5v40h11"></path>
-            </svg>
-            <input id="connect" type="checkbox"
-              aria-label="randomize on every step 1"
-              title="randomize on every step 1">
+      <div class="sequencer-layout">
+        <form id="sequencer" novalidate>
+          <fieldset id="settings">
+            <legend class="sr-only">sequence</legend>
+            <div class="step-row">
+              <div class="steps" id="steps"></div>
+              <button id="add-step" type="button" aria-label="add empty step" title="add empty step">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 4h2v7h7v2h-7v7h-2v-7H4v-2h7z"></path></svg>
+              </button>
+              <button id="remove-step" type="button" aria-label="remove last step" title="remove last step">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h8l1 2h3v2H4V5h3l1-2zm-2 6h12l-1 12H7L6 9zm3 2 .5 8h1L10 11H9zm5 0-.5 8h1l.5-8h-1z"></path></svg>
+              </button>
+            </div>
+            <div class="link" id="link">
+              <svg viewBox="0 0 16 42" aria-hidden="true">
+                <path d="M16 1H5v40h11"></path>
+              </svg>
+              <input id="connect" type="checkbox"
+                aria-label="randomize on every step 1"
+                title="randomize on every step 1">
+            </div>
+            <div class="step-controls">
+              <button id="randomize" type="button">randomize steps</button>
+              <button id="clear" type="button">clear</button>
+              <button id="reset" type="button">reset</button>
+              <button id="next-step" type="button">step</button>
+            </div>
+          </fieldset>
+          <div class="controls">
+            <div class="tempo">
+              <label for="bpm">bpm</label>
+              <input id="bpm" name="bpm" type="text" inputmode="numeric"
+                maxlength="3" value="120" required pattern="[0-9]+" autocomplete="off"
+                aria-describedby="bpm-range">
+              <span id="bpm-range" class="sr-only">bpm must be between 1 and 999.</span>
+              <button id="bpm-decrease" type="button" aria-label="decrease bpm" title="decrease bpm">−</button>
+              <button id="bpm-increase" type="button" aria-label="increase bpm" title="increase bpm">+</button>
+            </div>
+            <button id="transport" type="submit" aria-label="play" title="play">
+              <svg class="play-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M7 4v16l13-8z"></path>
+              </svg>
+              <svg class="stop-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M5 5h14v14H5z"></path>
+              </svg>
+            </button>
           </div>
-          <div class="step-controls">
-            <button id="randomize" type="button">randomize</button>
-            <button id="clear" type="button">clear</button>
-            <button id="reset" type="button">reset</button>
-            <button id="next-step" type="button">step</button>
-          </div>
-        </fieldset>
-        <div class="controls">
-          <div class="tempo">
-            <label for="bpm">bpm</label>
-            <input id="bpm" name="bpm" type="text" inputmode="numeric"
-              maxlength="3" value="120" required pattern="[0-9]+" autocomplete="off"
-              aria-describedby="bpm-range">
-            <span id="bpm-range" class="sr-only">bpm must be between 1 and 999.</span>
-            <button id="bpm-decrease" type="button" aria-label="decrease bpm" title="decrease bpm">−</button>
-            <button id="bpm-increase" type="button" aria-label="increase bpm" title="increase bpm">+</button>
-          </div>
-          <button id="transport" type="submit" aria-label="play" title="play">
-            <svg class="play-icon" viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M7 4v16l13-8z"></path>
-            </svg>
-            <svg class="stop-icon" viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M5 5h14v14H5z"></path>
-            </svg>
-          </button>
+        </form>
+        <p id="status" role="status" aria-live="polite"></p>
+        <p id="timing" aria-live="off" hidden></p>
+        <div id="pads" class="pads" role="group" aria-label="live pads"></div>
+        <button id="randomize-pads" type="button" aria-label="randomize chops for pads">randomize chops</button>
+        <div class="pad-link">
+          <svg viewBox="0 0 16 100" preserveAspectRatio="none" aria-hidden="true">
+            <path d="M5 0v99h11" vector-effect="non-scaling-stroke"></path>
+          </svg>
+          <input id="randomize-pad-timecodes" type="checkbox"
+            aria-label="also randomize pad timecodes on every step 1"
+            title="also randomize pad timecodes on every step 1">
         </div>
-      </form>
-      <p id="status" role="status" aria-live="polite"></p>
-      <p id="timing" aria-live="off" hidden></p>
-      <div id="pads" class="pads" role="group" aria-label="live pads"></div>
+      </div>
     </main>
   </body>
 </html>

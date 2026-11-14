@@ -436,7 +436,7 @@ Deno.test("stop and navigation cancel the timer", () => {
 Deno.test("rejects malformed settings and non-video pages", () => {
   const app = setup();
   for (const data of [
-    { sequence: sequence.slice(1), bpm: 120 },
+    { sequence: [], bpm: 120 },
     { sequence: [...sequence.slice(0, 7), "10"], bpm: 120 },
     { sequence, bpm: 0 },
     { sequence, bpm: 1000 },
@@ -527,6 +527,34 @@ Deno.test("live pads do not restart already playing video", () => {
   assert.equal(app.send("trigger", { key: "5" }).ok, true);
 });
 
+Deno.test("recorded pad times seek exactly on live pads and sequencer steps", () => {
+  const app = setup();
+  app.video.currentTime = 42.375;
+  const recorded = app.send("record", { key: "8" });
+  assert.equal(recorded.timecode, 42.375);
+  app.video.currentTime = 0;
+  assert.equal(app.send("trigger", { key: "8", timecode: recorded.timecode }).ok, true);
+  assert.equal(app.video.currentTime, 42.375);
+  assert.equal(app.events.length, 0);
+
+  const state = app.send("play", {
+    sequence: ["2", ...sequence.slice(1)], bpm: 120, recordedPadTimes: { "2": 18.625 }
+  });
+  assert.equal(state.padValue, "2");
+  assert.equal(app.video.currentTime, 18.625);
+  assert.equal(app.events.length, 0);
+  assert.equal(app.send("status").videoDuration, 100);
+});
+
+Deno.test("recorded pad times can be updated while the sequence is playing", () => {
+  const app = setup();
+  app.send("play", { sequence: ["0", "2", ...sequence.slice(2)], bpm: 120 });
+  assert.equal(app.send("update", { recordedPadTimes: { "2": 18.625 } }).ok, true);
+  app.advance(500);
+  assert.equal(app.video.currentTime, 18.625);
+  assert.equal(app.events.length, 2);
+});
+
 Deno.test("live pads reject invalid digits and missing players", () => {
   const app = setup();
   for (const key of ["", "10", "x", 1, null]) {
@@ -569,6 +597,32 @@ Deno.test("replacing the pattern during playback preserves position, tempo and t
   replacement[1] = "0";
   app.advance(500);
   assert.equal(app.events[2].key, "8");
+});
+
+Deno.test("resizing a live sequence continues with the next valid step", () => {
+  const app = setup();
+  const observer = app.connect();
+  app.send("play", { sequence: ["1", "2"], bpm: 120 });
+  app.advance(500);
+  assert.equal(app.send("update", { sequence: ["1", "2", "3"] }).ok, true);
+  app.advance(1000);
+  assert.equal(observer.updates.at(-1).stepValue, "3");
+  assert.equal(app.send("update", { sequence: ["1"] }).ok, true);
+  app.advance(1500);
+  assert.equal(observer.updates.at(-1).stepValue, "1");
+  app.advance(2000);
+  assert.equal(observer.updates.at(-1).stepValue, "1");
+  app.send("stop");
+});
+
+Deno.test("randomization preserves a sequence longer than eight steps", () => {
+  const app = setup({ random: () => 0 });
+  const pattern = Array(12).fill("1");
+  const state = app.send("play", { sequence: pattern, bpm: 120, randomize: true });
+  assert.equal(state.sequence.length, 12);
+  for (let step = 1; step <= 12; step++) app.advance(step * 500);
+  assert.equal(app.send("status").currentStep, 0);
+  app.send("stop");
 });
 
 Deno.test("rejects invalid replacement patterns without changing playback", () => {
@@ -637,7 +691,41 @@ Deno.test("randomize on step 1 reshuffles the sequence each loop", () => {
   app.send("stop");
 });
 
-Deno.test("prohibited pads cannot be triggered or played by the sequence", () => {
+Deno.test("linked randomization changes pad times on each sequence randomization before playing the step", () => {
+  const app = setup({ random: () => 0.25 });
+  const observer = app.connect();
+  const state = app.send("play", {
+    sequence, bpm: 120, randomize: true, randomizePadTimecodes: true
+  });
+  assert.equal(state.sequence[0], "2");
+  assert.equal(app.video.currentTime, 25);
+  assert.equal(app.events.length, 0);
+  assert.deepEqual(Object.keys(state.recordedPadTimes).sort(), [..."0123456789"]);
+  assert.equal(Object.values(state.recordedPadTimes).every(time => time === 25), true);
+  assert.equal(observer.updates[0].padTimesSerial, 1);
+  assert.equal(app.send("update", { randomizePadTimecodes: false }).ok, true);
+  for (let step = 1; step <= 8; step++) app.advance(step * 500);
+  assert.equal(app.send("status").padTimesSerial, 1);
+  assert.equal(observer.updates.at(-1).recordedPadTimes, undefined);
+  app.send("stop");
+});
+
+Deno.test("linked randomization reports an unavailable video duration without replacing pad times", () => {
+  const app = setup({ random: () => 0 });
+  const observer = app.connect();
+  app.video.duration = Infinity;
+  const state = app.send("play", {
+    sequence, bpm: 120, randomize: true, randomizePadTimecodes: true,
+    recordedPadTimes: { "0": 12 }
+  });
+  assert.equal(app.video.currentTime, 12);
+  assert.match(state.padRandomizeError, /duration is available/);
+  assert.match(observer.updates[0].padRandomizeError, /duration is available/);
+  assert.equal(state.padTimesSerial, 0);
+  app.send("stop");
+});
+
+Deno.test("forbidden pads cannot be triggered or played by the sequence", () => {
   const app = setup();
   assert.equal(app.send("prohibited", { prohibitedPads: ["1"] }).ok, true);
   assert.equal(app.send("trigger", { key: "1" }).ok, false);
@@ -649,7 +737,7 @@ Deno.test("prohibited pads cannot be triggered or played by the sequence", () =>
   assert.equal(app.events.some(event => event.key === "1"), false);
 });
 
-Deno.test("prohibiting the currently active pad mutes it immediately during playback", () => {
+Deno.test("forbidding the currently active pad mutes it immediately during playback", () => {
   const app = setup();
   const observer = app.connect();
   app.send("play", { sequence, bpm: 120 });
@@ -661,7 +749,7 @@ Deno.test("prohibiting the currently active pad mutes it immediately during play
   assert.equal(app.events.at(-2).key, "1");
 });
 
-Deno.test("prohibited pads are excluded from loop randomization", () => {
+Deno.test("forbidden pads are excluded from loop randomization", () => {
   const app = setup({ random: () => 0 });
   const observer = app.connect();
   const state = app.send("play", {
@@ -698,7 +786,7 @@ Deno.test("include-empty setting updates live loop randomization", () => {
   app.send("stop");
 });
 
-Deno.test("prohibited pad lists reject invalid values without changing current settings", () => {
+Deno.test("forbidden pad lists reject invalid values without changing current settings", () => {
   const app = setup();
   app.send("prohibited", { prohibitedPads: ["2"] });
   for (const prohibitedPads of [["x"], ["2", "2"], Array(11).fill("2"), "2"]) {

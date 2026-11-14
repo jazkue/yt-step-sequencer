@@ -9,7 +9,9 @@
 
 ## use
 
-- Set eight steps to digits `0–9` or leave them empty to continue playback without a jump. Set the bpm and press play.
+- Set steps to digits `0–9` or leave them empty to continue playback without a jump. Use **+** and the trash icon after the last step to add or remove steps (at least one remains). Resize the window to see more steps. Set the bpm and press play.
 - Click pads or use number keys to play live. The highlighted pad shows the last digit played by the sequencer, including through empty steps. Select a step to assign a pad; use **step** or Enter to advance, and Escape to deselect.
-- Use the small prohibited icon on a pad to mute it and exclude it from playback and randomization. The **empty steps when randomizing** checkbox controls whether **randomize** can add empty steps. Use **clear** or **reset** to change the pattern. Steps and bpm can be edited during playback.
+- Use the small forbidden icon on a pad to mute it and exclude it from playback and randomization. The **empty steps when randomizing** checkbox controls whether **randomize steps** can add empty steps. Use **clear** or **reset** to change the pattern. Steps and bpm can be edited during playback.
+- Use a pad's record icon to assign the current video time to that pad. Its label shows the recorded time, and hovering shows the precise timecode. Recordings are saved per video; **reset** clears them and restores the default 0–9 seek positions.
+- Use **randomize chops** below the pads to assign every pad a random timecode between the start and end of the video. When automatic sequence randomization is enabled, the lower checkbox on the left also randomizes pad timecodes on each loop. **randomize steps** changes only the steps.
 - If playback is blocked, reload YouTube and try again.
