@@ -119,7 +119,11 @@ function setSequence(sequence) {
   if (selectedStep !== null && selectedStep >= inputs.length) selectStep(null);
 }
 
-setSequence(Array.from({ length: 8 }, (_, index) => String(index)));
+function defaultSequence() {
+  return Array.from({ length: 8 }, (_, index) => String(index));
+}
+
+setSequence(defaultSequence());
 
 const padButtons = new Map();
 const prohibitedButtons = new Map();
@@ -554,7 +558,7 @@ resetButton.addEventListener("click", () => {
       showStatus(error.message || "could not reset recorded pad times.", true);
     }
   });
-  replaceSequence(inputs.map((_, index) => String(index % 10)));
+  replaceSequence(defaultSequence());
 });
 
 function showStatus(text, error = false) {
