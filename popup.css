@@ -21,7 +21,7 @@ body {
   min-width: 412px;
 }
 
-main { width: 412px; margin: 0 auto; padding: 24px 40px; }
+main { width: max(412px, 100%); margin: 0; padding: 24px 40px; }
 
 h1 {
   margin: 0;
@@ -33,6 +33,7 @@ h1 {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  width: 332px;
   margin-bottom: 8px;
 }
 .options { position: relative; }
@@ -68,36 +69,7 @@ h1 {
   accent-color: var(--ink);
 }
 
-.sequencer-layout { position: relative; }
-.pad-link {
-  position: absolute;
-  left: -20px;
-  top: 60px;
-  bottom: 14px;
-  width: 16px;
-  pointer-events: none;
-}
-.pad-link svg {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  fill: none;
-  stroke: var(--border);
-  stroke-width: 1.5;
-}
-.pad-link input {
-  position: absolute;
-  left: -1px;
-  top: 50%;
-  width: 12px;
-  height: 12px;
-  margin: 0;
-  transform: translateY(-50%);
-  accent-color: var(--ink);
-  cursor: pointer;
-  pointer-events: auto;
-}
+.sequencer-layout { position: relative; width: 332px; }
 
 fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
 .sr-only {
@@ -112,19 +84,21 @@ fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
   border: 0;
 }
 
-.step-row { display: flex; align-items: center; gap: 5px; width: max(100%, calc((100vw + 252px) / 2)); }
+.step-row { display: flex; align-items: center; gap: 5px; width: max(100%, calc(100vw - 80px)); }
 .steps {
   display: grid;
   grid-auto-flow: column;
-  grid-auto-columns: calc((332px - 45px - 56px) / 8);
+  grid-auto-columns: calc((332px - 45px - 56px - 8px) / 8);
   gap: 5px;
   min-width: 0;
+  padding: 4px;
   overflow-x: auto;
   scrollbar-width: none;
 }
 .step-row button { flex-shrink: 0; width: 28px; height: 28px; border: 0; background: transparent; }
 .step-row button:active:not(:disabled) { background: transparent; }
 .step { min-width: 0; }
+.step.selected, .step.drop-target { position: relative; z-index: 1; }
 
 input {
   width: 100%;
@@ -137,13 +111,14 @@ input {
   text-align: center;
 }
 
-.step input { height: 36px; font-size: 15px; }
+.step input { display: block; height: auto; aspect-ratio: 1; font-size: 15px; scroll-margin: 4px; }
 .step.active input { background: var(--accent); color: var(--ink); }
 .step.selected input { outline: 2px solid var(--focus); outline-offset: 2px; }
 .step.drop-target input { outline: 2px dashed var(--focus); outline-offset: 2px; }
 #settings { position: relative; }
 .link {
   position: absolute;
+  z-index: 2;
   left: -20px;
   top: 18px;
   width: 16px;
@@ -160,17 +135,19 @@ input {
 }
 .link input {
   position: absolute;
+  z-index: 1;
   left: -1px;
-  top: 15px;
+  top: 50%;
   width: 12px;
   height: 12px;
   margin: 0;
+  transform: translateY(-50%);
   accent-color: var(--ink);
   cursor: pointer;
 }
 .step-controls { display: flex; gap: 5px; margin-top: 10px; }
 .step-controls #next-step { margin-left: auto; }
-.step-controls button, #randomize-pads {
+.step-controls button {
   width: auto;
   height: 28px;
   padding: 0 10px;
@@ -224,6 +201,7 @@ button svg { width: 16px; height: 16px; fill: currentColor; }
 button.playing .stop-icon { display: block; }
 
 #video-title {
+  width: 332px;
   margin: 0 0 24px;
   color: var(--muted);
   font-size: 11px;
@@ -243,7 +221,6 @@ button.playing .stop-icon { display: block; }
   gap: 5px;
   margin-top: 20px;
 }
-#randomize-pads { margin-top: 10px; }
 .pad { position: relative; min-width: 0; }
 .pads .pad-play {
   width: 100%;

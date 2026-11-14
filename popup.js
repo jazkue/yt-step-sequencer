@@ -5,7 +5,6 @@ const steps = document.querySelector("#steps");
 const addStepButton = document.querySelector("#add-step");
 const removeStepButton = document.querySelector("#remove-step");
 const randomizeButton = document.querySelector("#randomize");
-const randomizePadsButton = document.querySelector("#randomize-pads");
 const includeEmptyStepsInput = document.querySelector("#include-empty-steps");
 const clearButton = document.querySelector("#clear");
 const resetButton = document.querySelector("#reset");
@@ -18,7 +17,6 @@ const status = document.querySelector("#status");
 const timing = document.querySelector("#timing");
 const pads = document.querySelector("#pads");
 const connectBox = document.querySelector("#connect");
-const randomizePadTimecodesInput = document.querySelector("#randomize-pad-timecodes");
 const videoTitle = document.querySelector("#video-title");
 const link = document.querySelector("#link");
 const optionsToggle = document.querySelector("#options-toggle");
@@ -34,10 +32,8 @@ let bpmTimer = null;
 let transportPending = false;
 let selectedStep = null;
 let lastStepSerial = -1;
-let lastPadTimesSerial = 0;
 let prohibitedPads = new Set();
 let includeEmptySteps = true;
-let randomizePadTimecodes = false;
 let videoId = null;
 let videoDuration = null;
 let defaultPadTimes = {};
@@ -205,13 +201,6 @@ function calculateDefaultPadTimes(duration) {
   ));
 }
 
-function randomPadTimecodes() {
-  if (!Number.isFinite(videoDuration) || videoDuration < 0) return null;
-  return Object.fromEntries([..."1234567890"].map(key =>
-    [key, Math.random() * videoDuration]
-  ));
-}
-
 function updatePadLabels() {
   for (const [key, button] of padButtons) {
     const recorded = Object.prototype.hasOwnProperty.call(recordedPadTimes, key);
@@ -272,19 +261,6 @@ includeEmptyStepsInput.addEventListener("change", () => {
       if (playing) await send("update", { includeEmptySteps });
     } catch (error) {
       showStatus(error.message || "could not update randomization settings.", true);
-    }
-  });
-});
-
-randomizePadTimecodesInput.addEventListener("change", () => {
-  randomizePadTimecodes = randomizePadTimecodesInput.checked;
-  const value = randomizePadTimecodes;
-  enqueue(async () => {
-    try {
-      await chrome.storage.local.set({ randomizePadTimecodes: value });
-      if (playing) await send("update", { randomizePadTimecodes: value });
-    } catch (error) {
-      showStatus(error.message || "could not save the pad timecode setting.", true);
     }
   });
 });
@@ -377,12 +353,10 @@ document.addEventListener("keydown", event => {
     optionsToggle.focus();
     return;
   }
-  if (optionsMenu.contains(event.target) || event.target === optionsToggle ||
-      event.target === randomizePadTimecodesInput) return;
+  if (optionsMenu.contains(event.target) || event.target === optionsToggle) return;
   if (event.key === "Enter" && selectedStep !== null &&
       event.target !== bpmInput && event.target !== nextStepButton &&
       event.target !== randomizeButton &&
-      event.target !== randomizePadsButton &&
       event.target !== addStepButton &&
       event.target !== removeStepButton &&
       event.target !== clearButton &&
@@ -469,30 +443,16 @@ function randomSequence() {
   return inputs.map(() => choices[Math.floor(Math.random() * choices.length)]);
 }
 
-function replaceSequence(sequence, padTimes = null) {
-  if (sequence) setSequence(sequence);
-  if (padTimes) {
-    recordedPadTimes = { ...padTimes };
-    if (videoId) recordedPadTimesByVideo[videoId] = { ...recordedPadTimes };
-    updatePadLabels();
-  }
+function replaceSequence(sequence) {
+  setSequence(sequence);
   enqueue(async () => {
     try {
       let state;
       if (playing) {
-        if (sequence) {
-          state = await send("update", { sequence });
-          await chrome.storage.local.set({ sequence: state.sequence, bpm: state.bpm });
-        }
-        if (padTimes) {
-          state = await send("update", { recordedPadTimes: { ...padTimes } });
-          await chrome.storage.local.set({ recordedPadTimesByVideo });
-        }
+        state = await send("update", { sequence });
+        await chrome.storage.local.set({ sequence: state.sequence, bpm: state.bpm });
       } else {
-        const saved = {};
-        if (sequence) saved.sequence = sequence;
-        if (padTimes) saved.recordedPadTimesByVideo = recordedPadTimesByVideo;
-        if (Object.keys(saved).length) await chrome.storage.local.set(saved);
+        await chrome.storage.local.set({ sequence });
       }
       if (state) updateState(state);
       else if (!playing) showGuidance();
@@ -530,15 +490,6 @@ randomizeButton.addEventListener("click", () => {
     return;
   }
   replaceSequence(sequence);
-});
-randomizePadsButton.addEventListener("click", () => {
-  flash(randomizePadsButton);
-  const padTimes = randomPadTimecodes();
-  if (!padTimes) {
-    showStatus("cannot randomize pad timecodes until the video duration is available.", true);
-    return;
-  }
-  replaceSequence(null, padTimes);
 });
 clearButton.addEventListener("click", () => replaceSequence(inputs.map(() => "")));
 resetButton.addEventListener("click", () => {
@@ -587,10 +538,8 @@ function updateState(state, hydrate = false) {
   for (const button of padButtons.values()) button.disabled = false;
   for (const button of prohibitedButtons.values()) button.disabled = false;
   for (const button of recordButtons.values()) button.disabled = false;
-  randomizePadsButton.disabled = false;
   optionsToggle.disabled = false;
   includeEmptyStepsInput.disabled = false;
-  randomizePadTimecodesInput.disabled = false;
   if (playing && hydrate) setSequence(state.sequence);
   if (typeof state.videoId === "string" && state.videoId && state.videoId !== videoId) {
     videoId = state.videoId;
@@ -609,10 +558,6 @@ function updateState(state, hydrate = false) {
   if (playing && typeof state.includeEmptySteps === "boolean") {
     includeEmptySteps = state.includeEmptySteps;
     includeEmptyStepsInput.checked = includeEmptySteps;
-  }
-  if (playing && hydrate && typeof state.randomizePadTimecodes === "boolean") {
-    randomizePadTimecodes = state.randomizePadTimecodes;
-    randomizePadTimecodesInput.checked = randomizePadTimecodes;
   }
   if (Array.isArray(state.prohibitedPads)) {
     prohibitedPads = new Set(state.prohibitedPads);
@@ -634,31 +579,14 @@ function updateState(state, hydrate = false) {
     setConnected(state.randomizeOnStart === true);
   }
   markBpmValidity();
-  if (state.playbackError || (playing && state.padRandomizeError)) {
-    showStatus(state.playbackError || state.padRandomizeError, true);
+  if (state.playbackError) {
+    showStatus(state.playbackError, true);
   }
   else if (!status.classList.contains("error") || hydrate) showGuidance();
 }
 
 function updateStepIndicator(state) {
   if (!Number.isInteger(state.stepSerial) || state.stepSerial < lastStepSerial) return;
-  if (Number.isInteger(state.padTimesSerial) && state.padTimesSerial > lastPadTimesSerial &&
-      state.videoId === videoId && state.recordedPadTimes) {
-    lastPadTimesSerial = state.padTimesSerial;
-    recordedPadTimes = normalizeRecordedPadTimes(state.recordedPadTimes);
-    recordedPadTimesByVideo[videoId] = { ...recordedPadTimes };
-    const savedTimesByVideo = { ...recordedPadTimesByVideo };
-    updatePadLabels();
-    flash(randomizePadsButton);
-    enqueue(async () => {
-      try {
-        await chrome.storage.local.set({ recordedPadTimesByVideo: savedTimesByVideo });
-      } catch (error) {
-        showStatus(error.message || "could not save randomized pad times.", true);
-      }
-    });
-  }
-  if (state.padRandomizeError) showStatus(state.padRandomizeError, true);
   if ("padValue" in state) updatePadIndicator(state.padValue);
   lastStepSerial = state.stepSerial;
   if (state.randomized && Array.isArray(state.sequence) && state.sequence.length === inputs.length) {
@@ -685,10 +613,8 @@ function setUnavailable(message) {
   }
   for (const button of prohibitedButtons.values()) button.disabled = true;
   for (const button of recordButtons.values()) button.disabled = true;
-  randomizePadsButton.disabled = true;
   optionsToggle.disabled = true;
   includeEmptyStepsInput.disabled = true;
-  randomizePadTimecodesInput.disabled = true;
   transport.disabled = true;
   showStatus(message, true);
 }
@@ -754,6 +680,37 @@ function updateLive(data) {
       showStatus(error.message || "could not update the sequence.", true);
     }
   });
+}
+
+async function fitOpeningWindow() {
+  const [popup, displays] = await Promise.all([
+    chrome.windows.getCurrent(),
+    chrome.system.display.getInfo()
+  ]);
+  if (!Number.isInteger(popup.id) ||
+      ![popup.left, popup.top, popup.width, popup.height].every(Number.isFinite)) {
+    throw new Error("could not determine the sequencer window size.");
+  }
+  const centerX = popup.left + popup.width / 2;
+  const centerY = popup.top + popup.height / 2;
+  const display = displays.find(({ bounds }) =>
+    centerX >= bounds.left && centerX < bounds.left + bounds.width &&
+    centerY >= bounds.top && centerY < bounds.top + bounds.height
+  ) || displays.find(item => item.isPrimary);
+  if (!display) throw new Error("could not determine the display.");
+  const area = display.workArea;
+  const stepOverflow = Math.max(0, steps.scrollWidth - steps.clientWidth);
+  const heightOverflow = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+  const width = Math.min(area.width, popup.width + stepOverflow + (stepOverflow > 0 ? 1 : 0));
+  const height = Math.min(area.height, popup.height + heightOverflow);
+  if (width === popup.width && height === popup.height) return;
+  const left = Math.max(area.left, Math.min(
+    Math.round(centerX - width / 2), area.left + area.width - width
+  ));
+  const top = Math.max(area.top, Math.min(
+    Math.round(centerY - height / 2), area.top + area.height - height
+  ));
+  await chrome.windows.update(popup.id, { width, height, left, top });
 }
 
 function applyBpm() {
@@ -842,8 +799,6 @@ form.addEventListener("submit", async event => {
   settings.disabled = true;
   optionsToggle.disabled = true;
   includeEmptyStepsInput.disabled = true;
-  randomizePadTimecodesInput.disabled = true;
-  randomizePadsButton.disabled = true;
   for (const button of recordButtons.values()) button.disabled = true;
   bpmInput.disabled = true;
   bpmDecrease.disabled = true;
@@ -853,7 +808,7 @@ form.addEventListener("submit", async event => {
       await chrome.storage.local.set({ sequence, bpm });
       const state = await send("play", {
         sequence, bpm, randomize: connectBox.checked, prohibitedPads: [...prohibitedPads],
-        includeEmptySteps, recordedPadTimes: { ...recordedPadTimes }, randomizePadTimecodes
+        includeEmptySteps, recordedPadTimes: { ...recordedPadTimes }
       });
       status.classList.remove("error");
       updateState(state);
@@ -861,8 +816,6 @@ form.addEventListener("submit", async event => {
       settings.disabled = false;
       optionsToggle.disabled = false;
       includeEmptyStepsInput.disabled = false;
-      randomizePadTimecodesInput.disabled = false;
-      randomizePadsButton.disabled = false;
       for (const button of recordButtons.values()) button.disabled = false;
       bpmInput.disabled = false;
       bpmDecrease.disabled = false;
@@ -873,8 +826,6 @@ form.addEventListener("submit", async event => {
       transport.disabled = false;
       optionsToggle.disabled = false;
       includeEmptyStepsInput.disabled = false;
-      randomizePadTimecodesInput.disabled = false;
-      randomizePadsButton.disabled = false;
       for (const button of recordButtons.values()) button.disabled = false;
     }
   });
@@ -885,13 +836,11 @@ async function initialize() {
   try {
     const saved = await chrome.storage.local.get([
       "sequence", "bpm", "randomize", "prohibitedPads", "includeEmptySteps",
-      "recordedPadTimesByVideo", "randomizePadTimecodes"
+      "recordedPadTimesByVideo"
     ]);
     setConnected(saved.randomize === true);
     includeEmptySteps = saved.includeEmptySteps !== false;
     includeEmptyStepsInput.checked = includeEmptySteps;
-    randomizePadTimecodes = saved.randomizePadTimecodes === true;
-    randomizePadTimecodesInput.checked = randomizePadTimecodes;
     prohibitedPads = new Set(Array.isArray(saved.prohibitedPads)
       ? saved.prohibitedPads.filter(key => typeof key === "string" && /^[0-9]$/.test(key))
       : []);
@@ -949,6 +898,15 @@ async function initialize() {
     }, 1000);
   } catch {
     setUnavailable("could not start the extension. try reopening it.");
+  } finally {
+    try {
+      await fitOpeningWindow();
+    } catch (error) {
+      console.error("Could not resize the sequencer window:", error);
+      if (!status.classList.contains("error")) {
+        showStatus(error.message || "could not resize the sequencer window.", true);
+      }
+    }
   }
 }
 

@@ -691,37 +691,20 @@ Deno.test("randomize on step 1 reshuffles the sequence each loop", () => {
   app.send("stop");
 });
 
-Deno.test("linked randomization changes pad times on each sequence randomization before playing the step", () => {
+Deno.test("automatic step randomization preserves recorded pad times", () => {
   const app = setup({ random: () => 0.25 });
   const observer = app.connect();
   const state = app.send("play", {
-    sequence, bpm: 120, randomize: true, randomizePadTimecodes: true
+    sequence, bpm: 120, randomize: true, randomizePadTimecodes: true,
+    recordedPadTimes: { "2": 18.625 }
   });
   assert.equal(state.sequence[0], "2");
-  assert.equal(app.video.currentTime, 25);
+  assert.equal(app.video.currentTime, 18.625);
   assert.equal(app.events.length, 0);
-  assert.deepEqual(Object.keys(state.recordedPadTimes).sort(), [..."0123456789"]);
-  assert.equal(Object.values(state.recordedPadTimes).every(time => time === 25), true);
-  assert.equal(observer.updates[0].padTimesSerial, 1);
-  assert.equal(app.send("update", { randomizePadTimecodes: false }).ok, true);
   for (let step = 1; step <= 8; step++) app.advance(step * 500);
-  assert.equal(app.send("status").padTimesSerial, 1);
-  assert.equal(observer.updates.at(-1).recordedPadTimes, undefined);
-  app.send("stop");
-});
-
-Deno.test("linked randomization reports an unavailable video duration without replacing pad times", () => {
-  const app = setup({ random: () => 0 });
-  const observer = app.connect();
-  app.video.duration = Infinity;
-  const state = app.send("play", {
-    sequence, bpm: 120, randomize: true, randomizePadTimecodes: true,
-    recordedPadTimes: { "0": 12 }
-  });
-  assert.equal(app.video.currentTime, 12);
-  assert.match(state.padRandomizeError, /duration is available/);
-  assert.match(observer.updates[0].padRandomizeError, /duration is available/);
-  assert.equal(state.padTimesSerial, 0);
+  assert.equal(observer.updates.at(-1).randomized, true);
+  assert.equal(app.video.currentTime, 18.625);
+  assert.deepEqual({ ...app.send("status").recordedPadTimes }, { "2": 18.625 });
   app.send("stop");
 });
 

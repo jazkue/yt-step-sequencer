@@ -14,9 +14,6 @@
   let prohibitedPads = [];
   let includeEmptySteps = true;
   let recordedPadTimes = {};
-  let randomizePadTimecodes = false;
-  let padTimesSerial = 0;
-  let padRandomizeError = null;
   let padValue = null;
   let timingDelays = 0;
   let playbackError = null;
@@ -51,8 +48,7 @@
     return {
       playing: sequence !== null, sequence, bpm, currentStep, stepValue, stepSerial,
       timingDelays, playbackError, padValue, randomizeOnStart, prohibitedPads,
-      includeEmptySteps, recordedPadTimes, padTimesSerial, padRandomizeError,
-      randomizePadTimecodes, videoId: currentVideoId(),
+      includeEmptySteps, recordedPadTimes, videoId: currentVideoId(),
       videoDuration: Number.isFinite(duration) && duration >= 0 ? duration : null
     };
   }
@@ -167,19 +163,6 @@
     const randomizedSequence = randomizeOnStart && currentStep === 0 ? randomSequence() : null;
     const randomized = randomizedSequence !== null;
     if (randomized) sequence = randomizedSequence;
-    let randomizedPadTimes;
-    if (randomized && randomizePadTimecodes) {
-      if (Number.isFinite(video.duration) && video.duration >= 0) {
-        recordedPadTimes = Object.fromEntries([..."0123456789"].map(key =>
-          [key, Math.random() * video.duration]
-        ));
-        randomizedPadTimes = recordedPadTimes;
-        padTimesSerial++;
-        padRandomizeError = null;
-      } else {
-        padRandomizeError = "Cannot randomize pad timecodes until the video duration is available.";
-      }
-    }
     stepValue = sequence[currentStep];
     if (stepValue !== "" && !prohibitedPads.includes(stepValue)) {
       if (Object.prototype.hasOwnProperty.call(recordedPadTimes, stepValue)) {
@@ -192,9 +175,7 @@
     stepSerial++;
     notifyObservers({
       currentStep, stepValue, padValue, stepSerial, timingDelays,
-      ...(randomized && { sequence, randomized }),
-      ...(randomizedPadTimes && { recordedPadTimes: randomizedPadTimes, padTimesSerial, videoId }),
-      ...(randomized && randomizePadTimecodes && { padRandomizeError })
+      ...(randomized && { sequence, randomized })
     });
     nextTime += interval;
     const now = performance.now();
@@ -306,15 +287,9 @@
         sendResponse({ ok: false, error: "Include-empty-steps setting must be true or false." });
         return;
       }
-      if (message.randomizePadTimecodes !== undefined && typeof message.randomizePadTimecodes !== "boolean") {
-        sendResponse({ ok: false, error: "Pad randomization setting must be true or false." });
-        return;
-      }
       if (message.prohibitedPads !== undefined) setProhibitedPads(message.prohibitedPads);
       if (message.recordedPadTimes !== undefined) recordedPadTimes = { ...message.recordedPadTimes };
       if (message.includeEmptySteps !== undefined) includeEmptySteps = message.includeEmptySteps;
-      randomizePadTimecodes = message.randomizePadTimecodes === true;
-      padRandomizeError = null;
       stop();
       const attempt = generation;
       const start = () => {
@@ -387,13 +362,6 @@
           return;
         }
         recordedPadTimes = { ...message.recordedPadTimes };
-      } else if (message.randomizePadTimecodes !== undefined) {
-        if (typeof message.randomizePadTimecodes !== "boolean") {
-          sendResponse({ ok: false, error: "Pad randomization setting must be true or false." });
-          return;
-        }
-        randomizePadTimecodes = message.randomizePadTimecodes;
-        padRandomizeError = null;
       } else if (message.randomize !== undefined) {
         randomizeOnStart = message.randomize === true;
       } else if (message.bpm !== undefined) {
