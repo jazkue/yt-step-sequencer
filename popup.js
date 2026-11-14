@@ -207,11 +207,13 @@ function updatePadLabels() {
     const timecode = recorded ? recordedPadTimes[key] : defaultPadTime(key);
     if (timecode === null) {
       button.textContent = key;
+      delete button.dataset.timecode;
       button.title = "timecode unavailable until the video loads";
       button.setAttribute("aria-label", `play pad ${key}`);
     } else {
       const exact = formatTimecode(timecode);
       button.textContent = recorded ? compactTimecode(timecode) : key;
+      button.dataset.timecode = compactTimecode(timecode);
       button.title = `pad ${key}: ${exact}`;
       button.setAttribute("aria-label", `play pad ${key} at ${exact}`);
     }
