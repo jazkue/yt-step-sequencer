@@ -472,7 +472,14 @@ addStepButton.addEventListener("click", () => {
     return;
   }
   replaceSequence([...sequence, ""]);
-  steps.scrollLeft = steps.scrollWidth;
+  enqueue(async () => {
+    try {
+      await fitWindow(true);
+    } catch (error) {
+      console.error("Could not resize the sequencer window:", error);
+      showStatus(error.message || "could not resize the sequencer window.", true);
+    }
+  });
 });
 removeStepButton.addEventListener("click", () => {
   if (inputs.length === 1) return;
@@ -684,7 +691,7 @@ function updateLive(data) {
   });
 }
 
-async function fitOpeningWindow() {
+async function fitWindow(keepLeft = false) {
   const [popup, displays] = await Promise.all([
     chrome.windows.getCurrent(),
     chrome.system.display.getInfo()
@@ -703,13 +710,14 @@ async function fitOpeningWindow() {
   const area = display.workArea;
   const stepOverflow = Math.max(0, steps.scrollWidth - steps.clientWidth);
   const heightOverflow = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
-  const width = Math.min(area.width, popup.width + stepOverflow + (stepOverflow > 0 ? 1 : 0));
-  const height = Math.min(area.height, popup.height + heightOverflow);
+  const maxWidth = keepLeft ? Math.max(popup.width, area.left + area.width - popup.left) : area.width;
+  const width = Math.min(maxWidth, popup.width + stepOverflow + (stepOverflow > 0 ? 1 : 0));
+  const height = keepLeft ? popup.height : Math.min(area.height, popup.height + heightOverflow);
   if (width === popup.width && height === popup.height) return;
-  const left = Math.max(area.left, Math.min(
+  const left = keepLeft ? popup.left : Math.max(area.left, Math.min(
     Math.round(centerX - width / 2), area.left + area.width - width
   ));
-  const top = Math.max(area.top, Math.min(
+  const top = keepLeft ? popup.top : Math.max(area.top, Math.min(
     Math.round(centerY - height / 2), area.top + area.height - height
   ));
   await chrome.windows.update(popup.id, { width, height, left, top });
@@ -902,7 +910,7 @@ async function initialize() {
     setUnavailable("could not start the extension. try reopening it.");
   } finally {
     try {
-      await fitOpeningWindow();
+      await fitWindow();
     } catch (error) {
       console.error("Could not resize the sequencer window:", error);
       if (!status.classList.contains("error")) {
