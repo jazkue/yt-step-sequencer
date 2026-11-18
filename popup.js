@@ -465,6 +465,17 @@ function replaceSequence(sequence) {
   });
 }
 
+function resizeForSteps(shrink = false) {
+  enqueue(async () => {
+    try {
+      await fitWindow(true, shrink);
+    } catch (error) {
+      console.error("Could not resize the sequencer window:", error);
+      showStatus(error.message || "could not resize the sequencer window.", true);
+    }
+  });
+}
+
 addStepButton.addEventListener("click", () => {
   const sequence = inputs.map(input => input.value);
   if (!sequence.every(validStep)) {
@@ -472,14 +483,7 @@ addStepButton.addEventListener("click", () => {
     return;
   }
   replaceSequence([...sequence, ""]);
-  enqueue(async () => {
-    try {
-      await fitWindow(true);
-    } catch (error) {
-      console.error("Could not resize the sequencer window:", error);
-      showStatus(error.message || "could not resize the sequencer window.", true);
-    }
-  });
+  resizeForSteps();
 });
 removeStepButton.addEventListener("click", () => {
   if (inputs.length === 1) return;
@@ -489,6 +493,7 @@ removeStepButton.addEventListener("click", () => {
     return;
   }
   replaceSequence(sequence);
+  resizeForSteps(true);
 });
 
 randomizeButton.addEventListener("click", () => {
@@ -691,7 +696,7 @@ function updateLive(data) {
   });
 }
 
-async function fitWindow(keepLeft = false) {
+async function fitWindow(keepLeft = false, shrink = false) {
   const [popup, displays] = await Promise.all([
     chrome.windows.getCurrent(),
     chrome.system.display.getInfo()
@@ -711,7 +716,14 @@ async function fitWindow(keepLeft = false) {
   const stepOverflow = Math.max(0, steps.scrollWidth - steps.clientWidth);
   const heightOverflow = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
   const maxWidth = keepLeft ? Math.max(popup.width, area.left + area.width - popup.left) : area.width;
-  const width = Math.min(maxWidth, popup.width + stepOverflow + (stepOverflow > 0 ? 1 : 0));
+  const unusedWidth = shrink
+    ? removeStepButton.parentElement.getBoundingClientRect().right -
+      removeStepButton.getBoundingClientRect().right
+    : 0;
+  const minWidth = Math.min(popup.width, popup.width - window.innerWidth + 412);
+  const width = shrink
+    ? Math.max(minWidth, Math.ceil(popup.width - unusedWidth))
+    : Math.min(maxWidth, popup.width + stepOverflow + (stepOverflow > 0 ? 1 : 0));
   const height = keepLeft ? popup.height : Math.min(area.height, popup.height + heightOverflow);
   if (width === popup.width && height === popup.height) return;
   const left = keepLeft ? popup.left : Math.max(area.left, Math.min(
