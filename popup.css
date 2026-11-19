@@ -256,9 +256,8 @@ button.playing .stop-icon { display: block; }
 .pads button.current, .pads button.active { background: var(--accent); color: var(--ink); }
 .pad.pad-prohibited .pad-play { opacity: 0.45; }
 .pad.pad-recorded .pad-play { color: var(--error); }
-.pads .pad-play:hover[data-timecode] { color: transparent; visibility: hidden; }
+.pads .pad-play:hover[data-timecode] { color: transparent; }
 .pads .pad-play:hover[data-timecode]::after {
-  visibility: visible;
   position: absolute;
   left: 0;
   right: 0;
