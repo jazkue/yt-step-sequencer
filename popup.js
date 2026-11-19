@@ -346,6 +346,13 @@ function handleScrubbing(event) {
   
   activeScrubber.timecode = newTimecode;
   
+  // Update pad label in real-time while scrubbing
+  const button = padButtons.get(activeScrubber.key);
+  if (button) {
+    button.textContent = compactTimecode(newTimecode);
+    button.dataset.timecode = compactTimecode(newTimecode);
+  }
+  
   if (tabId) {
     send("scrub", { key: activeScrubber.key, timecode: newTimecode }).catch(error => {
       console.warn("Could not scrub timecode:", error.message);
