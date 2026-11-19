@@ -132,6 +132,8 @@ const padTimers = new Map();
 let activeScrubber = null;
 let scrubStartX = 0;
 let scrubStartTime = 0;
+let lastScrubTime = 0;
+const SCRUB_THROTTLE = 16;
 
 for (const key of "1234567890") {
   const pad = document.createElement("div");
@@ -228,7 +230,7 @@ function updatePadLabels() {
       button.setAttribute("aria-label", `play pad ${key}`);
     } else {
       const exact = formatTimecode(timecode);
-      button.textContent = recorded ? compactTimecode(timecode) : key;
+      button.textContent = key;
       button.dataset.timecode = compactTimecode(timecode);
       button.title = `pad ${key}: ${exact}`;
       button.setAttribute("aria-label", `play pad ${key} at ${exact}`);
@@ -317,7 +319,7 @@ function startScrubbing(event, key) {
   
   scrubberButtons.get(key)?.classList.add("scrubbing");
   
-  document.addEventListener("pointermove", handleScrubbing);
+  document.addEventListener("pointermove", handleScrubbing, { passive: true });
   document.addEventListener("pointerup", stopScrubbing);
   event.preventDefault();
 }
@@ -325,20 +327,22 @@ function startScrubbing(event, key) {
 function handleScrubbing(event) {
   if (!activeScrubber) return;
   
+  const now = performance.now();
+  if (now - lastScrubTime < SCRUB_THROTTLE) return;
+  lastScrubTime = now;
+  
   const deltaX = event.clientX - scrubStartX;
-  const videoDuration = videoDuration || 1;
-  const scrubSpeed = videoDuration / 300;
-  const newTimecode = Math.max(0, Math.min(videoDuration, scrubStartTime + (deltaX * scrubSpeed)));
+  const duration = videoDuration || 1;
+  const scrubSpeed = duration / 300;
+  const newTimecode = Math.max(0, Math.min(duration, scrubStartTime + (deltaX * scrubSpeed)));
   
   activeScrubber.timecode = newTimecode;
   
-  enqueue(async () => {
-    try {
-      await send("scrub", { key: activeScrubber.key, timecode: newTimecode });
-    } catch (error) {
+  if (tabId) {
+    send("scrub", { key: activeScrubber.key, timecode: newTimecode }).catch(error => {
       console.warn("Could not scrub timecode:", error.message);
-    }
-  });
+    });
+  }
 }
 
 function stopScrubbing() {
@@ -355,13 +359,10 @@ function stopScrubbing() {
       recordedPadTimes[key] = timecode;
       recordedPadTimesByVideo[videoId] = { ...recordedPadTimes };
       updatePadLabels();
-      const updates = [
-        chrome.storage.local.set({ recordedPadTimesByVideo })
-      ];
+      await chrome.storage.local.set({ recordedPadTimesByVideo });
       if (playing) {
-        updates.push(send("update", { recordedPadTimes: { ...recordedPadTimes } }));
+        await send("update", { recordedPadTimes: { ...recordedPadTimes } });
       }
-      await Promise.allSettled(updates);
     } catch (error) {
       console.warn("Could not save scrubbed timecode:", error.message);
     }

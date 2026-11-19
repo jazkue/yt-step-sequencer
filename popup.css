@@ -255,9 +255,8 @@ button.playing .stop-icon { display: block; }
 }
 .pads button.current, .pads button.active { background: var(--accent); color: var(--ink); }
 .pad.pad-prohibited .pad-play { opacity: 0.45; }
-.pads .pad-play.pad-recorded { font-size: 10px; }
-.pads .pad-play:not(.pad-recorded):hover[data-timecode] { color: transparent; }
-.pads .pad-play:not(.pad-recorded):hover[data-timecode]::after {
+.pads .pad-play:hover[data-timecode] { color: transparent; }
+.pads .pad-play:hover[data-timecode]::after {
   position: absolute;
   left: 0;
   right: 0;
@@ -282,7 +281,8 @@ button.playing .stop-icon { display: block; }
 .pads .record-toggle { bottom: 2px; }
 .pads .scrubber-toggle { bottom: 2px; left: 2px; right: auto; }
 .pads .prohibit-toggle:hover, .pads .record-toggle:hover, .pads .scrubber-toggle:hover,
-.pad.pad-prohibited .prohibit-toggle { color: var(--error); }
+.pad.pad-prohibited .prohibit-toggle,
+.pad.pad-recorded .record-toggle { color: var(--error); }
 .pads .prohibit-toggle svg, .pads .record-toggle svg, .pads .scrubber-toggle svg {
   display: block;
   width: 12px;
