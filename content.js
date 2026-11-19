@@ -255,6 +255,24 @@
       sendResponse({ ok: true });
       return;
     }
+    if (message.type === `${MESSAGE_PREFIX}scrub`) {
+      if (typeof message.key !== "string" || !/^[0-9]$/.test(message.key)) {
+        sendResponse({ ok: false, error: "Enter a digit from 0 to 9." });
+        return;
+      }
+      if (!Number.isFinite(message.timecode) || message.timecode < 0) {
+        sendResponse({ ok: false, error: "Enter a valid timecode." });
+        return;
+      }
+      const video = document.querySelector(".html5-video-player")?.querySelector("video");
+      if (!video) {
+        sendResponse({ ok: false, error: "Open a YouTube video and wait for the player to load." });
+        return;
+      }
+      video.currentTime = message.timecode;
+      sendResponse({ ok: true });
+      return;
+    }
     if (message.type === `${MESSAGE_PREFIX}play`) {
       const id = currentVideoId();
       const player = document.querySelector(".html5-video-player");

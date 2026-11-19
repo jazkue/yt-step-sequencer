@@ -127,7 +127,11 @@ setSequence(defaultSequence());
 const padButtons = new Map();
 const prohibitedButtons = new Map();
 const recordButtons = new Map();
+const scrubberButtons = new Map();
 const padTimers = new Map();
+let activeScrubber = null;
+let scrubStartX = 0;
+let scrubStartTime = 0;
 
 for (const key of "1234567890") {
   const pad = document.createElement("div");
@@ -161,11 +165,20 @@ for (const key of "1234567890") {
   record.disabled = true;
   record.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle></svg>';
   record.addEventListener("click", () => recordPad(key));
-  pad.append(button, prohibited, record);
+  const scrubber = document.createElement("button");
+  scrubber.type = "button";
+  scrubber.className = "scrubber-toggle";
+  scrubber.setAttribute("aria-label", `scrub time for pad ${key}`);
+  scrubber.title = `hold and drag left/right to adjust time for pad ${key}`;
+  scrubber.disabled = true;
+  scrubber.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h16M8 8l-4 4 4 4M16 8l4 4-4 4"></path></svg>';
+  scrubber.addEventListener("pointerdown", (event) => startScrubbing(event, key));
+  pad.append(button, prohibited, record, scrubber);
   pads.append(pad);
   padButtons.set(key, button);
   prohibitedButtons.set(key, prohibited);
   recordButtons.set(key, record);
+  scrubberButtons.set(key, scrubber);
 }
 
 function flash(button) {
@@ -291,6 +304,70 @@ function recordPad(key) {
       showStatus(error.message || "could not record the video time.", true);
     }
   });
+}
+
+function startScrubbing(event, key) {
+  if (!videoId || scrubberButtons.get(key)?.disabled) return;
+  const timecode = recordedPadTimes[key] ?? defaultPadTime(key);
+  if (timecode === null) return;
+  
+  activeScrubber = { key, timecode };
+  scrubStartX = event.clientX;
+  scrubStartTime = timecode;
+  
+  scrubberButtons.get(key)?.classList.add("scrubbing");
+  
+  document.addEventListener("pointermove", handleScrubbing);
+  document.addEventListener("pointerup", stopScrubbing);
+  event.preventDefault();
+}
+
+function handleScrubbing(event) {
+  if (!activeScrubber) return;
+  
+  const deltaX = event.clientX - scrubStartX;
+  const videoDuration = videoDuration || 1;
+  const scrubSpeed = videoDuration / 300;
+  const newTimecode = Math.max(0, Math.min(videoDuration, scrubStartTime + (deltaX * scrubSpeed)));
+  
+  activeScrubber.timecode = newTimecode;
+  
+  enqueue(async () => {
+    try {
+      await send("scrub", { key: activeScrubber.key, timecode: newTimecode });
+    } catch (error) {
+      console.warn("Could not scrub timecode:", error.message);
+    }
+  });
+}
+
+function stopScrubbing() {
+  if (!activeScrubber) return;
+  
+  const { key, timecode } = activeScrubber;
+  scrubberButtons.get(key)?.classList.remove("scrubbing");
+  
+  document.removeEventListener("pointermove", handleScrubbing);
+  document.removeEventListener("pointerup", stopScrubbing);
+  
+  enqueue(async () => {
+    try {
+      recordedPadTimes[key] = timecode;
+      recordedPadTimesByVideo[videoId] = { ...recordedPadTimes };
+      updatePadLabels();
+      const updates = [
+        chrome.storage.local.set({ recordedPadTimesByVideo })
+      ];
+      if (playing) {
+        updates.push(send("update", { recordedPadTimes: { ...recordedPadTimes } }));
+      }
+      await Promise.allSettled(updates);
+    } catch (error) {
+      console.warn("Could not save scrubbed timecode:", error.message);
+    }
+  });
+  
+  activeScrubber = null;
 }
 
 function updatePadIndicator(value) {
@@ -564,6 +641,7 @@ function updateState(state, hydrate = false) {
   for (const button of padButtons.values()) button.disabled = false;
   for (const button of prohibitedButtons.values()) button.disabled = false;
   for (const button of recordButtons.values()) button.disabled = false;
+  for (const button of scrubberButtons.values()) button.disabled = false;
   optionsToggle.disabled = false;
   includeEmptyStepsInput.disabled = false;
   if (playing && hydrate) setSequence(state.sequence);
@@ -640,6 +718,7 @@ function setUnavailable(message) {
   }
   for (const button of prohibitedButtons.values()) button.disabled = true;
   for (const button of recordButtons.values()) button.disabled = true;
+  for (const button of scrubberButtons.values()) button.disabled = true;
   optionsToggle.disabled = true;
   includeEmptyStepsInput.disabled = true;
   transport.disabled = true;
@@ -874,6 +953,7 @@ form.addEventListener("submit", async event => {
   optionsToggle.disabled = true;
   includeEmptyStepsInput.disabled = true;
   for (const button of recordButtons.values()) button.disabled = true;
+  for (const button of scrubberButtons.values()) button.disabled = true;
   bpmInput.disabled = true;
   bpmDecrease.disabled = true;
   bpmIncrease.disabled = true;
@@ -891,6 +971,7 @@ form.addEventListener("submit", async event => {
       optionsToggle.disabled = false;
       includeEmptyStepsInput.disabled = false;
       for (const button of recordButtons.values()) button.disabled = false;
+      for (const button of scrubberButtons.values()) button.disabled = false;
       bpmInput.disabled = false;
       bpmDecrease.disabled = false;
       bpmIncrease.disabled = false;
@@ -901,6 +982,7 @@ form.addEventListener("submit", async event => {
       optionsToggle.disabled = false;
       includeEmptyStepsInput.disabled = false;
       for (const button of recordButtons.values()) button.disabled = false;
+      for (const button of scrubberButtons.values()) button.disabled = false;
     }
   });
 });
