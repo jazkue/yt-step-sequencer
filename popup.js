@@ -201,12 +201,14 @@ function formatTimecode(time) {
 
 function compactTimecode(time) {
   const totalSeconds = Math.floor(time);
+  const centiseconds = Math.round((time - totalSeconds) * 100);
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor(totalSeconds / 60) % 60;
   const seconds = totalSeconds % 60;
-  return hours
+  const timecode = hours
     ? `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
     : `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  return `${timecode}.${String(centiseconds).padStart(2, "0")}`;
 }
 
 function defaultPadTime(key) {
