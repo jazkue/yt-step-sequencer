@@ -100,17 +100,9 @@
     return sequence.map(() => choices[Math.floor(Math.random() * choices.length)]);
   }
 
-  function dispatchDigit(player, key) {
-    const options = {
-      key,
-      code: `Digit${key}`,
-      keyCode: 48 + Number(key),
-      which: 48 + Number(key),
-      bubbles: true,
-      cancelable: true
-    };
-    player.dispatchEvent(new KeyboardEvent("keydown", options));
-    player.dispatchEvent(new KeyboardEvent("keyup", options));
+  function digitToTimecode(digit, duration) {
+    const keyNumber = Number(digit);
+    return (duration * keyNumber) / 10;
   }
 
   function notifyObservers(message) {
@@ -168,7 +160,7 @@
       if (Object.prototype.hasOwnProperty.call(recordedPadTimes, stepValue)) {
         video.currentTime = recordedPadTimes[stepValue];
       } else {
-        dispatchDigit(player, stepValue);
+        video.currentTime = digitToTimecode(stepValue, video.duration);
       }
       padValue = stepValue;
     }
@@ -252,7 +244,7 @@
       }
       const timecode = message.timecode;
       if (timecode !== undefined) video.currentTime = timecode;
-      else dispatchDigit(player, message.key);
+      else video.currentTime = digitToTimecode(message.key, video.duration);
       if (video.paused) {
         video.play().then(
           () => sendResponse({ ok: true }),
