@@ -184,7 +184,7 @@ for (const key of "1234567890") {
   undo.setAttribute("aria-label", `reset pad ${key} to default`);
   undo.title = `reset pad ${key} to default`;
   undo.disabled = true;
-  undo.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M12 18 A6 6 0 0 0 12 6 L12 3 L9 6 L12 9" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></path></svg>';
+  undo.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 18 A6 6 0 0 0 12 6 L12 3 L9 6 L12 9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>';
   undo.addEventListener("click", () => undoPad(key));
   pad.append(button, prohibited, record, scrubber, undo);
   pads.append(pad);
