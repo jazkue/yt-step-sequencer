@@ -134,6 +134,7 @@ let scrubStartX = 0;
 let scrubStartTime = 0;
 let lastScrubTime = 0;
 const SCRUB_THROTTLE = 16;
+const SCRUB_SENSITIVITY = 100; // milliseconds per pixel
 
 for (const key of "1234567890") {
   const pad = document.createElement("div");
@@ -230,7 +231,12 @@ function updatePadLabels() {
       button.setAttribute("aria-label", `play pad ${key}`);
     } else {
       const exact = formatTimecode(timecode);
-      button.textContent = key;
+      // Show recorded timecode instead of pad number, or default pad time
+      if (recorded) {
+        button.textContent = compactTimecode(timecode);
+      } else {
+        button.textContent = key;
+      }
       button.dataset.timecode = compactTimecode(timecode);
       button.title = `pad ${key}: ${exact}`;
       button.setAttribute("aria-label", `play pad ${key} at ${exact}`);
@@ -332,9 +338,9 @@ function handleScrubbing(event) {
   lastScrubTime = now;
   
   const deltaX = event.clientX - scrubStartX;
-  const duration = videoDuration || 1;
-  const scrubSpeed = duration / 300;
-  const newTimecode = Math.max(0, Math.min(duration, scrubStartTime + (deltaX * scrubSpeed)));
+  // Micro-adjustments: each pixel = SCRUB_SENSITIVITY milliseconds
+  const deltaMs = deltaX * SCRUB_SENSITIVITY;
+  const newTimecode = Math.max(0, scrubStartTime + (deltaMs / 1000));
   
   activeScrubber.timecode = newTimecode;
   
