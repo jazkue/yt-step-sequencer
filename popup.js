@@ -125,6 +125,7 @@ function defaultSequence() {
 setSequence(defaultSequence());
 
 const padButtons = new Map();
+const padContainers = new Map();
 const prohibitedButtons = new Map();
 const recordButtons = new Map();
 const scrubberButtons = new Map();
@@ -179,6 +180,7 @@ for (const key of "1234567890") {
   pad.append(button, prohibited, record, scrubber);
   pads.append(pad);
   padButtons.set(key, button);
+  padContainers.set(key, pad);
   prohibitedButtons.set(key, prohibited);
   recordButtons.set(key, record);
   scrubberButtons.set(key, scrubber);
@@ -224,6 +226,7 @@ function calculateDefaultPadTimes(duration) {
 
 function updatePadLabels() {
   for (const [key, button] of padButtons) {
+    const pad = padContainers.get(key);
     const recorded = Object.prototype.hasOwnProperty.call(recordedPadTimes, key);
     const timecode = recorded ? recordedPadTimes[key] : defaultPadTime(key);
     if (timecode === null) {
@@ -243,7 +246,7 @@ function updatePadLabels() {
       button.title = `pad ${key}: ${exact}`;
       button.setAttribute("aria-label", `play pad ${key} at ${exact}`);
     }
-    button.classList.toggle("pad-recorded", recorded);
+    pad.classList.toggle("pad-recorded", recorded);
   }
 }
 
