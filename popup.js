@@ -645,6 +645,7 @@ resetButton.addEventListener("click", () => {
   updatePadLabels();
   const resetTimes = {};
   const savedTimesByVideo = { ...recordedPadTimesByVideo };
+  connectBox.checked = false;
   enqueue(async () => {
     try {
       const updates = [chrome.storage.local.set({ recordedPadTimesByVideo: savedTimesByVideo })];
