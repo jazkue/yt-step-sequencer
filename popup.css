@@ -269,7 +269,7 @@ button.playing .stop-icon { display: block; }
   pointer-events: none;
 }
 .pad.pad-recorded .pad-play:hover[data-timecode]::after { color: var(--error); }
-.pads .prohibit-toggle, .pads .record-toggle, .pads .scrubber-toggle {
+.pads .prohibit-toggle, .pads .record-toggle, .pads .scrubber-toggle, .pads .undo-toggle {
   position: absolute;
   right: 2px;
   width: 14px;
@@ -282,10 +282,11 @@ button.playing .stop-icon { display: block; }
 .pads .prohibit-toggle { top: 2px; }
 .pads .record-toggle { bottom: 2px; }
 .pads .scrubber-toggle { bottom: 2px; left: 2px; right: auto; }
-.pads .prohibit-toggle:hover, .pads .record-toggle:hover, .pads .scrubber-toggle:hover,
+.pads .undo-toggle { top: 2px; left: 2px; right: auto; }
+.pads .prohibit-toggle:hover, .pads .record-toggle:hover, .pads .scrubber-toggle:hover, .pads .undo-toggle:hover,
 .pad.pad-prohibited .prohibit-toggle,
 .pad.pad-recorded .record-toggle { color: var(--error); }
-.pads .prohibit-toggle svg, .pads .record-toggle svg, .pads .scrubber-toggle svg {
+.pads .prohibit-toggle svg, .pads .record-toggle svg, .pads .scrubber-toggle svg, .pads .undo-toggle svg {
   display: block;
   width: 12px;
   height: 12px;
@@ -294,5 +295,5 @@ button.playing .stop-icon { display: block; }
   stroke-width: 2;
 }
 .pads .record-toggle svg { fill: currentColor; stroke: none; }
-.pads .prohibit-toggle:disabled, .pads .record-toggle:disabled, .pads .scrubber-toggle:disabled { opacity: 0.4; }
+.pads .prohibit-toggle:disabled, .pads .record-toggle:disabled, .pads .scrubber-toggle:disabled, .pads .undo-toggle:disabled { opacity: 0.4; }
 .pads .scrubber-toggle.scrubbing { color: var(--accent); }

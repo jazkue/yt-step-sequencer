@@ -129,6 +129,7 @@ const padContainers = new Map();
 const prohibitedButtons = new Map();
 const recordButtons = new Map();
 const scrubberButtons = new Map();
+const undoButtons = new Map();
 const padTimers = new Map();
 let activeScrubber = null;
 let scrubStartX = 0;
@@ -177,13 +178,22 @@ for (const key of "1234567890") {
   scrubber.disabled = true;
   scrubber.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h16M8 8l-4 4 4 4M16 8l4 4-4 4"></path></svg>';
   scrubber.addEventListener("pointerdown", (event) => startScrubbing(event, key));
-  pad.append(button, prohibited, record, scrubber);
+  const undo = document.createElement("button");
+  undo.type = "button";
+  undo.className = "undo-toggle";
+  undo.setAttribute("aria-label", `reset pad ${key} to default`);
+  undo.title = `reset pad ${key} to default`;
+  undo.disabled = true;
+  undo.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v9m0 0L7 9m5 5l5-5" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"></path><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2"></circle></svg>';
+  undo.addEventListener("click", () => undoPad(key));
+  pad.append(button, prohibited, record, scrubber, undo);
   pads.append(pad);
   padButtons.set(key, button);
   padContainers.set(key, pad);
   prohibitedButtons.set(key, prohibited);
   recordButtons.set(key, record);
   scrubberButtons.set(key, scrubber);
+  undoButtons.set(key, undo);
 }
 
 function flash(button) {
@@ -315,6 +325,23 @@ function recordPad(key) {
       if (failure) throw failure.reason;
     } catch (error) {
       showStatus(error.message || "could not record the video time.", true);
+    }
+  });
+}
+
+function undoPad(key) {
+  if (!videoId || undoButtons.get(key)?.disabled) return;
+  enqueue(async () => {
+    try {
+      delete recordedPadTimes[key];
+      recordedPadTimesByVideo[videoId] = { ...recordedPadTimes };
+      updatePadLabels();
+      await chrome.storage.local.set({ recordedPadTimesByVideo });
+      if (playing) {
+        await send("update", { recordedPadTimes: { ...recordedPadTimes } });
+      }
+    } catch (error) {
+      showStatus(error.message || "could not reset the pad.", true);
     }
   });
 }
@@ -661,6 +688,7 @@ function updateState(state, hydrate = false) {
   for (const button of prohibitedButtons.values()) button.disabled = false;
   for (const button of recordButtons.values()) button.disabled = false;
   for (const button of scrubberButtons.values()) button.disabled = false;
+  for (const button of undoButtons.values()) button.disabled = false;
   optionsToggle.disabled = false;
   includeEmptyStepsInput.disabled = false;
   if (playing && hydrate) setSequence(state.sequence);
@@ -738,6 +766,7 @@ function setUnavailable(message) {
   for (const button of prohibitedButtons.values()) button.disabled = true;
   for (const button of recordButtons.values()) button.disabled = true;
   for (const button of scrubberButtons.values()) button.disabled = true;
+  for (const button of undoButtons.values()) button.disabled = true;
   optionsToggle.disabled = true;
   includeEmptyStepsInput.disabled = true;
   transport.disabled = true;
@@ -973,6 +1002,7 @@ form.addEventListener("submit", async event => {
   includeEmptyStepsInput.disabled = true;
   for (const button of recordButtons.values()) button.disabled = true;
   for (const button of scrubberButtons.values()) button.disabled = true;
+  for (const button of undoButtons.values()) button.disabled = true;
   bpmInput.disabled = true;
   bpmDecrease.disabled = true;
   bpmIncrease.disabled = true;
@@ -991,6 +1021,7 @@ form.addEventListener("submit", async event => {
       includeEmptyStepsInput.disabled = false;
       for (const button of recordButtons.values()) button.disabled = false;
       for (const button of scrubberButtons.values()) button.disabled = false;
+      for (const button of undoButtons.values()) button.disabled = false;
       bpmInput.disabled = false;
       bpmDecrease.disabled = false;
       bpmIncrease.disabled = false;
@@ -1002,6 +1033,7 @@ form.addEventListener("submit", async event => {
       includeEmptyStepsInput.disabled = false;
       for (const button of recordButtons.values()) button.disabled = false;
       for (const button of scrubberButtons.values()) button.disabled = false;
+      for (const button of undoButtons.values()) button.disabled = false;
     }
   });
 });
