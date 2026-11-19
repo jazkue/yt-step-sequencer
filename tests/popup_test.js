@@ -79,6 +79,7 @@ async function setup({ left = 100, right = 1000, width = 412 } = {}) {
     popup, updates, errors, steps,
     add: () => elements.get("#add-step").listeners.click(),
     remove: () => elements.get("#remove-step").listeners.click(),
+    reset: () => elements.get("#reset").listeners.click(),
     settle: () => runInContext("commandQueue", context)
   };
 }
@@ -138,4 +139,15 @@ Deno.test("removing overflowing steps keeps the window size until the sequence f
   await app.settle();
   assert.equal(app.popup.width, 445);
   assert.equal(app.popup.left, 550);
+});
+
+Deno.test("reset restores the default window size", async () => {
+  const app = await setup();
+  app.popup.width = 550;
+  app.popup.height = 600;
+  app.reset();
+  await app.settle();
+  assert.equal(app.popup.width, 412);
+  assert.equal(app.popup.height, 460);
+  assert.equal(app.errors.length, 0);
 });

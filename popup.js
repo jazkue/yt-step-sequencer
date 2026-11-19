@@ -465,15 +465,19 @@ function replaceSequence(sequence) {
   });
 }
 
-function resizeForSteps(shrink = false) {
+function resizeWindow(keepLeft = false, shrink = false, restoreSize = false) {
   enqueue(async () => {
     try {
-      await fitWindow(true, shrink);
+      await fitWindow(keepLeft, shrink, restoreSize);
     } catch (error) {
       console.error("Could not resize the sequencer window:", error);
       showStatus(error.message || "could not resize the sequencer window.", true);
     }
   });
+}
+
+function resizeForSteps(shrink = false) {
+  resizeWindow(true, shrink);
 }
 
 addStepButton.addEventListener("click", () => {
@@ -524,6 +528,7 @@ resetButton.addEventListener("click", () => {
     }
   });
   replaceSequence(defaultSequence());
+  resizeWindow(false, false, true);
 });
 
 function showStatus(text, error = false) {
@@ -696,7 +701,7 @@ function updateLive(data) {
   });
 }
 
-async function fitWindow(keepLeft = false, shrink = false) {
+async function fitWindow(keepLeft = false, shrink = false, restoreSize = false) {
   const [popup, displays] = await Promise.all([
     chrome.windows.getCurrent(),
     chrome.system.display.getInfo()
@@ -721,10 +726,14 @@ async function fitWindow(keepLeft = false, shrink = false) {
       removeStepButton.getBoundingClientRect().right
     : 0;
   const minWidth = Math.min(popup.width, popup.width - window.innerWidth + 412);
-  const width = shrink
-    ? Math.max(minWidth, Math.ceil(popup.width - unusedWidth))
-    : Math.min(maxWidth, popup.width + stepOverflow + (stepOverflow > 0 ? 1 : 0));
-  const height = keepLeft ? popup.height : Math.min(area.height, popup.height + heightOverflow);
+  const width = restoreSize
+    ? Math.min(412, area.width)
+    : shrink
+      ? Math.max(minWidth, Math.ceil(popup.width - unusedWidth))
+      : Math.min(maxWidth, popup.width + stepOverflow + (stepOverflow > 0 ? 1 : 0));
+  const height = restoreSize
+    ? Math.min(460, area.height)
+    : keepLeft ? popup.height : Math.min(area.height, popup.height + heightOverflow);
   if (width === popup.width && height === popup.height) return;
   const left = keepLeft ? popup.left : Math.max(area.left, Math.min(
     Math.round(centerX - width / 2), area.left + area.width - width
