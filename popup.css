@@ -10,6 +10,11 @@
   --accent: #ac9d57;
   --focus: #268bd2;
   --error: #9c2523;
+  --step-height: 36px;
+  --step-controls-height: 28px;
+  --step-controls-gap: 10px;
+  --bracket-top-offset: 5px;
+  --bracket-visual-height: 40px;
   background: var(--background);
   color: var(--ink);
 }
@@ -84,14 +89,14 @@ fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
   border: 0;
 }
 
-.step-row { display: flex; align-items: center; gap: 5px; width: max(100%, calc(100vw - 80px)); }
+.step-row { display: flex; align-items: center; gap: 5px; width: max(100%, calc(100vw - 80px)); padding-left: 4px; }
 .steps {
   display: grid;
   grid-auto-flow: column;
   grid-auto-columns: calc((332px - 45px - 56px - 8px) / 8);
   gap: 5px;
   min-width: 0;
-  padding: 4px;
+  padding: 0;
   overflow-x: auto;
   scrollbar-width: none;
 }
@@ -120,9 +125,9 @@ input {
   position: absolute;
   z-index: 2;
   left: -20px;
-  top: 18px;
+  top: calc(var(--step-height) / 2 - var(--bracket-top-offset));
   width: 16px;
-  height: 42px;
+  height: var(--bracket-visual-height);
 }
 .link svg {
   position: absolute;
@@ -145,7 +150,7 @@ input {
   accent-color: var(--ink);
   cursor: pointer;
 }
-.step-controls { display: flex; gap: 5px; margin-top: 10px; }
+.step-controls { display: flex; gap: 5px; margin-top: 10px; padding-left: 4px; }
 .step-controls #next-step { margin-left: auto; }
 .step-controls button {
   width: auto;
@@ -180,6 +185,25 @@ input:disabled { opacity: 0.5; }
   color: var(--ink);
   font: inherit;
   font-size: 16px;
+}
+
+.tempo button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.tempo button:active:not(:disabled) {
+  background: var(--surface);
+}
+
+#tap-tempo {
+  width: 36px !important;
+  height: 36px !important;
+  font-size: 11px;
+}
+
+#tap-tempo:active:not(:disabled) {
+  filter: brightness(0.9);
 }
 
 button {

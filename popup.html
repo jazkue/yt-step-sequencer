@@ -59,12 +59,13 @@
           <div class="controls">
             <div class="tempo">
               <label for="bpm">bpm</label>
-              <input id="bpm" name="bpm" type="text" inputmode="numeric"
-                maxlength="3" value="120" required pattern="[0-9]+" autocomplete="off"
+              <input id="bpm" name="bpm" type="text" inputmode="decimal"
+                maxlength="6" value="120" required pattern="[0-9.]+" autocomplete="off"
                 aria-describedby="bpm-range">
-              <span id="bpm-range" class="sr-only">bpm must be between 1 and 999.</span>
+              <span id="bpm-range" class="sr-only">enter a bpm from 1 to 999.</span>
               <button id="bpm-decrease" type="button" aria-label="decrease bpm" title="decrease bpm">−</button>
               <button id="bpm-increase" type="button" aria-label="increase bpm" title="increase bpm">+</button>
+              <button id="tap-tempo" type="button" aria-label="tap tempo" title="tap tempo">tap</button>
             </div>
             <button id="transport" type="submit" aria-label="play" title="play">
               <svg class="play-icon" viewBox="0 0 24 24" aria-hidden="true">

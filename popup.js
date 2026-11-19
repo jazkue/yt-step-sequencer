@@ -12,6 +12,7 @@ const nextStepButton = document.querySelector("#next-step");
 const bpmInput = document.querySelector("#bpm");
 const bpmDecrease = document.querySelector("#bpm-decrease");
 const bpmIncrease = document.querySelector("#bpm-increase");
+const tapTempoButton = document.querySelector("#tap-tempo");
 const transport = document.querySelector("#transport");
 const status = document.querySelector("#status");
 const timing = document.querySelector("#timing");
@@ -39,6 +40,8 @@ let videoDuration = null;
 let defaultPadTimes = {};
 let recordedPadTimes = {};
 let recordedPadTimesByVideo = {};
+let tapTempoTimes = [];
+const TAP_TEMPO_THRESHOLD = 2000;
 
 function setOptionsOpen(open) {
   optionsMenu.hidden = !open;
@@ -427,6 +430,9 @@ function selectStep(index) {
 function advanceStep() {
   const completed = selectedStep === inputs.length - 1;
   selectStep(selectedStep === null ? 0 : (selectedStep + 1) % inputs.length);
+  if (connectBox.checked) {
+    connectBox.checked = false;
+  }
   if (completed && !playing && !transportPending && tabId !== null) {
     form.requestSubmit();
   }
@@ -554,6 +560,7 @@ function updateState(state, hydrate = false) {
   bpmInput.disabled = false;
   bpmDecrease.disabled = false;
   bpmIncrease.disabled = false;
+  tapTempoButton.disabled = false;
   for (const button of padButtons.values()) button.disabled = false;
   for (const button of prohibitedButtons.values()) button.disabled = false;
   for (const button of recordButtons.values()) button.disabled = false;
@@ -626,6 +633,7 @@ function setUnavailable(message) {
   bpmInput.disabled = true;
   bpmDecrease.disabled = true;
   bpmIncrease.disabled = true;
+  tapTempoButton.disabled = true;
   for (const button of padButtons.values()) {
     button.disabled = true;
     button.classList.remove("current");
@@ -648,7 +656,8 @@ async function send(type, data = {}) {
 
 function validBpmInput() {
   const bpm = Number(bpmInput.value);
-  return /^[0-9]+$/.test(bpmInput.value) && Number.isInteger(bpm) && bpm >= 1 && bpm <= 999;
+  const isValidFormat = /^[0-9]+(\.[0-9]+)?$/.test(bpmInput.value);
+  return isValidFormat && bpm >= 1 && bpm <= 999;
 }
 
 function markBpmValidity() {
@@ -771,15 +780,23 @@ form.addEventListener("keydown", event => {
   if (event.key === "Enter" && event.target === bpmInput) {
     event.preventDefault();
     applyBpm();
+    bpmInput.blur();
   }
 });
+
+bpmInput.addEventListener("wheel", event => {
+  event.preventDefault();
+  const delta = event.deltaY > 0 ? -1 : 1;
+  adjustBpm(delta);
+}, { passive: false });
 
 function adjustBpm(amount) {
   if (!markBpmValidity()) {
     showGuidance();
     return;
   }
-  const bpm = Math.max(1, Math.min(999, Number(bpmInput.value) + amount));
+  let bpm = Number(bpmInput.value) + amount;
+  bpm = Math.max(1, Math.min(999, bpm));
   if (bpm === Number(bpmInput.value)) return;
   clearTimeout(bpmTimer);
   bpmTimer = null;
@@ -792,8 +809,34 @@ function adjustBpm(amount) {
   }
 }
 
+function handleTapTempo() {
+  const now = Date.now();
+  tapTempoTimes.push(now);
+  
+  tapTempoTimes = tapTempoTimes.filter(time => now - time < TAP_TEMPO_THRESHOLD);
+  
+  if (tapTempoTimes.length < 2) return;
+  
+  let totalInterval = 0;
+  for (let i = 1; i < tapTempoTimes.length; i++) {
+    totalInterval += tapTempoTimes[i] - tapTempoTimes[i - 1];
+  }
+  const avgInterval = totalInterval / (tapTempoTimes.length - 1);
+  const bpm = Math.round((60000 / avgInterval) * 100) / 100;
+  
+  if (bpm >= 1 && bpm <= 999) {
+    bpmInput.value = String(bpm);
+    if (playing) {
+      updateLive({ bpm });
+    } else {
+      updateState({ playing: false, currentStep: -1 });
+    }
+  }
+}
+
 bpmDecrease.addEventListener("click", () => adjustBpm(-1));
 bpmIncrease.addEventListener("click", () => adjustBpm(1));
+tapTempoButton.addEventListener("click", handleTapTempo);
 
 form.addEventListener("submit", async event => {
   event.preventDefault();
