@@ -268,7 +268,8 @@ button.playing .stop-icon { display: block; }
   content: attr(data-timecode);
   pointer-events: none;
 }
-.pad.pad-recorded .pad-play:hover[data-timecode]::after { color: var(--error); }
+.pad.pad-recorded .pad-play:hover[data-timecode] { color: var(--error); }
+.pad.pad-recorded .pad-play:hover[data-timecode]::after { display: none; }
 .pads .prohibit-toggle, .pads .record-toggle, .pads .scrubber-toggle, .pads .undo-toggle {
   position: absolute;
   right: 2px;
