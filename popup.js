@@ -644,17 +644,26 @@ resetButton.addEventListener("click", () => {
   if (videoId) delete recordedPadTimesByVideo[videoId];
   updatePadLabels();
   const resetTimes = {};
+  prohibitedPads.clear();
+  updateProhibitedPadControls();
+  const resetProhibitedPads = [];
   const savedTimesByVideo = { ...recordedPadTimesByVideo };
   connectBox.checked = false;
   enqueue(async () => {
     try {
-      const updates = [chrome.storage.local.set({ recordedPadTimesByVideo: savedTimesByVideo })];
+      const updates = [chrome.storage.local.set({
+        recordedPadTimesByVideo: savedTimesByVideo,
+        prohibitedPads: resetProhibitedPads
+      })];
+      if (tabId !== null) {
+        updates.push(send("prohibited", { prohibitedPads: resetProhibitedPads }));
+      }
       if (playing) updates.push(send("update", { recordedPadTimes: resetTimes }));
       const results = await Promise.allSettled(updates);
       const failure = results.find(item => item.status === "rejected");
       if (failure) throw failure.reason;
     } catch (error) {
-      showStatus(error.message || "could not reset recorded pad times.", true);
+      showStatus(error.message || "could not reset pads.", true);
     }
   });
   replaceSequence(defaultSequence());

@@ -89,14 +89,14 @@ fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
   border: 0;
 }
 
-.step-row { display: flex; align-items: center; gap: 5px; width: max(100%, calc(100vw - 80px)); padding-left: 4px; }
+.step-row { display: flex; align-items: center; gap: 5px; width: max(100%, calc(100vw - 80px)); }
 .steps {
   display: grid;
   grid-auto-flow: column;
   grid-auto-columns: calc((332px - 45px - 56px - 8px) / 8);
   gap: 5px;
   min-width: 0;
-  padding: 0;
+  padding: 4px;
   overflow-x: auto;
   scrollbar-width: none;
 }
@@ -282,7 +282,7 @@ button.playing .stop-icon { display: block; }
 }
 .pads .prohibit-toggle { top: 2px; }
 .pads .record-toggle { bottom: 2px; }
-.pads .scrubber-toggle { bottom: 2px; left: 2px; right: auto; }
+.pads .scrubber-toggle { bottom: 2px; left: 2px; right: auto; z-index: 1; }
 .pads .undo-toggle { top: 2px; left: 2px; right: auto; }
 .pads .prohibit-toggle:hover, .pads .record-toggle:hover, .pads .scrubber-toggle:hover, .pads .undo-toggle:hover,
 .pad.pad-prohibited .prohibit-toggle,
@@ -297,4 +297,4 @@ button.playing .stop-icon { display: block; }
 }
 .pads .record-toggle svg { fill: currentColor; stroke: none; }
 .pads .prohibit-toggle:disabled, .pads .record-toggle:disabled, .pads .scrubber-toggle:disabled, .pads .undo-toggle:disabled { opacity: 0.4; }
-.pads .scrubber-toggle.scrubbing { color: var(--accent); }
+.pads .scrubber-toggle.scrubbing { color: var(--ink); }

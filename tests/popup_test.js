@@ -3,16 +3,26 @@ import { createContext, runInContext } from "node:vm";
 
 const source = await Deno.readTextFile(new URL("../popup.js", import.meta.url));
 
-async function setup({ left = 100, right = 1000, width = 412 } = {}) {
+async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [] } = {}) {
   const popup = { id: 1, left, top: 100, width, height: 460 };
   const updates = [];
   const errors = [];
+  const storageSets = [];
 
   class Element {
     children = [];
     listeners = {};
     dataset = {};
-    classList = { add() {}, remove() {}, toggle() {}, contains() { return false; } };
+    classList = {
+      values: new Set(),
+      add(value) { this.values.add(value); },
+      remove(value) { this.values.delete(value); },
+      toggle(value, force = !this.values.has(value)) {
+        if (force) this.values.add(value);
+        else this.values.delete(value);
+      },
+      contains(value) { return this.values.has(value); }
+    };
     scrollLeft = 0;
     value = "";
 
@@ -60,7 +70,12 @@ async function setup({ left = 100, right = 1000, width = 412 } = {}) {
     URLSearchParams,
     console: { error: (...args) => errors.push(args) },
     chrome: {
-      storage: { local: { get: async () => ({}), set: async () => {} } },
+      storage: {
+        local: {
+          get: async () => ({ prohibitedPads }),
+          set: async value => storageSets.push(JSON.parse(JSON.stringify(value)))
+        }
+      },
       windows: {
         getCurrent: async () => ({ ...popup }),
         update: async (_id, options) => { updates.push(options); Object.assign(popup, options); }
@@ -76,10 +91,14 @@ async function setup({ left = 100, right = 1000, width = 412 } = {}) {
   runInContext(source.replace("initialize();", "globalThis.initialized = initialize();"), context);
   await context.initialized;
   return {
-    popup, updates, errors, steps,
+    popup, updates, errors, steps, storageSets,
     add: () => elements.get("#add-step").listeners.click(),
     remove: () => elements.get("#remove-step").listeners.click(),
     reset: () => elements.get("#reset").listeners.click(),
+    isPadForbidden: key => runInContext(`prohibitedPads.has("${key}")`, context),
+    isPadMarkedForbidden: key => runInContext(
+      `padContainers.get("${key}").classList.contains("pad-prohibited")`, context
+    ),
     settle: () => runInContext("commandQueue", context)
   };
 }
@@ -150,4 +169,18 @@ Deno.test("reset restores the default window size", async () => {
   assert.equal(app.popup.width, 412);
   assert.equal(app.popup.height, 460);
   assert.equal(app.errors.length, 0);
+});
+
+Deno.test("reset allows all pads and clears their forbidden state", async () => {
+  const app = await setup({ prohibitedPads: ["1", "4"] });
+  assert.equal(app.isPadForbidden("1"), true);
+  assert.equal(app.isPadMarkedForbidden("1"), true);
+  app.reset();
+  await app.settle();
+  assert.equal(app.isPadForbidden("1"), false);
+  assert.equal(app.isPadForbidden("4"), false);
+  assert.equal(app.isPadMarkedForbidden("1"), false);
+  assert.ok(app.storageSets.some(value =>
+    Array.isArray(value.prohibitedPads) && value.prohibitedPads.length === 0
+  ));
 });
