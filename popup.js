@@ -14,24 +14,29 @@ const bpmDecrease = document.querySelector("#bpm-decrease");
 const bpmIncrease = document.querySelector("#bpm-increase");
 const tapTempoButton = document.querySelector("#tap-tempo");
 const metronomeInput = document.querySelector("#metronome");
+const sequenceRecordButton = document.querySelector("#sequence-record");
 const transport = document.querySelector("#transport");
 const status = document.querySelector("#status");
 const timing = document.querySelector("#timing");
 const pads = document.querySelector("#pads");
 const connectBox = document.querySelector("#connect");
 const videoTitle = document.querySelector("#video-title");
+const videoPlayback = document.querySelector("#video-playback");
 const link = document.querySelector("#link");
 const optionsToggle = document.querySelector("#options-toggle");
 const optionsMenu = document.querySelector("#options-menu");
 const flashTimers = new WeakMap();
 let tabId = null;
 let playing = false;
+let recordingSequence = false;
 let polling = false;
 let commandPending = false;
 let commandVersion = 0;
 let commandQueue = Promise.resolve();
 let bpmTimer = null;
 let transportPending = false;
+let videoPlaybackPending = false;
+let videoAvailable = false;
 let selectedStep = null;
 let lastStepSerial = -1;
 let prohibitedPads = new Set();
@@ -148,7 +153,16 @@ for (const key of "1234567890") {
   button.textContent = key;
   button.setAttribute("aria-label", `play ${key}`);
   button.disabled = true;
-  button.addEventListener("click", () => triggerPad(key));
+  let triggeredOnPointerDown = false;
+  button.addEventListener("pointerdown", event => {
+    triggeredOnPointerDown = recordingSequence && event.button === 0;
+    if (triggeredOnPointerDown) triggerPad(key, event.timeStamp);
+  });
+  button.addEventListener("click", event => {
+    const alreadyTriggered = triggeredOnPointerDown && event.detail > 0;
+    triggeredOnPointerDown = false;
+    if (!alreadyTriggered) triggerPad(key, event.timeStamp);
+  });
   button.draggable = true;
   button.addEventListener("dragstart", event => {
     event.dataTransfer.setData("application/x-yt-pad", key);
@@ -451,14 +465,14 @@ function toggleProhibitedPad(key) {
   });
 }
 
-async function triggerPad(key) {
+async function triggerPad(key, timeStamp) {
   const button = padButtons.get(key);
   if (!button || button.disabled) return;
-  if (selectedStep !== null) {
+  if (selectedStep !== null && !recordingSequence) {
     const input = inputs[selectedStep];
-    const stepHasFocus = inputs.includes(document.activeElement);
     input.value = key;
     input.dispatchEvent(new Event("input", { bubbles: true }));
+    const stepHasFocus = inputs.includes(document.activeElement);
     advanceStep();
     if (stepHasFocus) inputs[selectedStep].focus();
     else inputs[selectedStep].scrollIntoView({ block: "nearest", inline: "nearest" });
@@ -472,7 +486,11 @@ async function triggerPad(key) {
   }, 150));
   try {
     const timecode = recordedPadTimes[key];
-    await send("trigger", { key, ...(timecode !== undefined && { timecode }) });
+    await send("trigger", {
+      key,
+      ...(Number.isFinite(timeStamp) && { pressedAt: performance.timeOrigin + timeStamp }),
+      ...(timecode !== undefined && { timecode })
+    });
   } catch (error) {
     showStatus(error.message || "could not play the pad.", true);
   }
@@ -494,6 +512,8 @@ document.addEventListener("keydown", event => {
       event.target !== removeStepButton &&
       event.target !== clearButton &&
       event.target !== resetButton &&
+      event.target !== sequenceRecordButton &&
+      event.target !== videoPlayback &&
       event.target !== transport &&
       event.target !== bpmDecrease && event.target !== bpmIncrease) {
     event.preventDefault();
@@ -504,7 +524,7 @@ document.addEventListener("keydown", event => {
     selectStep(null);
   } else if (/^[0-9]$/.test(event.key) && event.target !== bpmInput) {
     event.preventDefault();
-    triggerPad(event.key);
+    triggerPad(event.key, event.timeStamp);
   }
 });
 
@@ -586,7 +606,10 @@ function replaceSequence(sequence) {
       let state;
       if (playing) {
         state = await send("update", { sequence });
-        await chrome.storage.local.set({ sequence: state.sequence, bpm: state.bpm });
+        await chrome.storage.local.set({
+          ...(state.recordingSequence ? {} : { sequence: state.sequence }),
+          bpm: state.bpm
+        });
       } else {
         await chrome.storage.local.set({ sequence });
       }
@@ -685,8 +708,10 @@ function showGuidance() {
     showStatus("steps must be empty or a digit from 0 to 9.", true);
   } else if (!validBpmInput()) {
     showStatus("enter a whole-number bpm from 1 to 999.", true);
+  } else if (recordingSequence) {
+    showStatus("recording. play pads to record the current step.");
   } else if (selectedStep !== null) {
-    showStatus(`step ${selectedStep + 1}: play a pad to assign and advance, step or enter to skip, esc to exit.`);
+    showStatus("press pad to save step.");
   } else {
     showStatus(playing ? "playing. edit steps or bpm live." : "press play to start.");
   }
@@ -694,12 +719,15 @@ function showGuidance() {
 
 function updateState(state, hydrate = false) {
   playing = state.playing;
+  if ("videoPaused" in state) updateVideoPlayback(state.videoPaused);
+  if (typeof state.recordingSequence === "boolean") recordingSequence = state.recordingSequence;
   settings.disabled = false;
   bpmInput.disabled = false;
   bpmDecrease.disabled = false;
   bpmIncrease.disabled = false;
   tapTempoButton.disabled = false;
-  metronomeInput.disabled = false;
+  metronomeInput.disabled = recordingSequence;
+  connectBox.disabled = recordingSequence;
   for (const button of padButtons.values()) button.disabled = false;
   for (const button of prohibitedButtons.values()) button.disabled = false;
   for (const button of recordButtons.values()) button.disabled = false;
@@ -707,7 +735,7 @@ function updateState(state, hydrate = false) {
   for (const button of undoButtons.values()) button.disabled = false;
   optionsToggle.disabled = false;
   includeEmptyStepsInput.disabled = false;
-  if (playing && hydrate) setSequence(state.sequence);
+  if (playing && hydrate && Array.isArray(state.sequence)) setSequence(state.sequence);
   if (typeof state.videoId === "string" && state.videoId && state.videoId !== videoId) {
     videoId = state.videoId;
     recordedPadTimes = { ...(recordedPadTimesByVideo[videoId] || {}) };
@@ -734,6 +762,11 @@ function updateState(state, hydrate = false) {
     metronomeInput.checked = state.metronomeEnabled;
   }
   transport.disabled = transportPending;
+  sequenceRecordButton.disabled = transportPending;
+  sequenceRecordButton.classList.toggle("recording", recordingSequence);
+  sequenceRecordButton.setAttribute("aria-pressed", String(recordingSequence));
+  sequenceRecordButton.setAttribute("aria-label", recordingSequence ? "stop recording" : "record sequence");
+  sequenceRecordButton.title = recordingSequence ? "stop recording" : "record sequence";
   transport.classList.toggle("playing", playing);
   transport.setAttribute("aria-label", playing ? "stop" : "play");
   transport.title = playing ? "stop" : "play";
@@ -749,10 +782,22 @@ function updateState(state, hydrate = false) {
     setConnected(state.randomizeOnStart === true);
   }
   markBpmValidity();
-  if (state.playbackError) {
+  if (state.recordingError) {
+    showStatus(state.recordingError, true);
+  } else if (state.playbackError) {
     showStatus(state.playbackError, true);
   }
   else if (!status.classList.contains("error") || hydrate) showGuidance();
+}
+
+function updateVideoPlayback(paused) {
+  videoAvailable = typeof paused === "boolean";
+  videoPlayback.disabled = videoPlaybackPending || !videoAvailable;
+  if (!videoAvailable) return;
+  videoPlayback.classList.toggle("playing", !paused);
+  const label = paused ? "play video" : "pause video";
+  videoPlayback.setAttribute("aria-label", label);
+  videoPlayback.title = label;
 }
 
 function updateStepIndicator(state) {
@@ -779,6 +824,7 @@ function setUnavailable(message) {
   bpmIncrease.disabled = true;
   tapTempoButton.disabled = true;
   metronomeInput.disabled = true;
+  sequenceRecordButton.disabled = true;
   for (const button of padButtons.values()) {
     button.disabled = true;
     button.classList.remove("current");
@@ -790,6 +836,7 @@ function setUnavailable(message) {
   optionsToggle.disabled = true;
   includeEmptyStepsInput.disabled = true;
   transport.disabled = true;
+  videoPlayback.disabled = true;
   showStatus(message, true);
 }
 
@@ -843,12 +890,33 @@ function enqueue(command) {
   return commandQueue;
 }
 
+videoPlayback.addEventListener("click", () => {
+  if (videoPlayback.disabled || tabId === null) return;
+  videoPlaybackPending = true;
+  videoPlayback.disabled = true;
+  enqueue(async () => {
+    try {
+      const state = await send("video-toggle");
+      status.classList.remove("error");
+      updateState(state);
+    } catch (error) {
+      showStatus(error.message || "could not change video playback.", true);
+    } finally {
+      videoPlaybackPending = false;
+      if (tabId !== null) videoPlayback.disabled = !videoAvailable;
+    }
+  });
+});
+
 function updateLive(data) {
   enqueue(async () => {
     if (!playing) return;
     try {
       const state = await send("update", data);
-      await chrome.storage.local.set({ sequence: state.sequence, bpm: state.bpm });
+      await chrome.storage.local.set({
+        ...(state.recordingSequence ? {} : { sequence: state.sequence }),
+        bpm: state.bpm
+      });
       status.classList.remove("error");
       updateState(state);
     } catch (error) {
@@ -1005,6 +1073,85 @@ metronomeInput.addEventListener("change", () => {
   });
 });
 
+function setRecordingStartControls(disabled) {
+  settings.disabled = disabled;
+  bpmInput.disabled = disabled;
+  bpmDecrease.disabled = disabled;
+  bpmIncrease.disabled = disabled;
+  tapTempoButton.disabled = disabled;
+  metronomeInput.disabled = disabled || recordingSequence;
+  optionsToggle.disabled = disabled;
+  includeEmptyStepsInput.disabled = disabled;
+  for (const buttons of [padButtons, prohibitedButtons, recordButtons, scrubberButtons, undoButtons]) {
+    for (const button of buttons.values()) button.disabled = disabled;
+  }
+}
+
+sequenceRecordButton.addEventListener("click", () => {
+  if (transportPending || tabId === null) return;
+  if (!recordingSequence && !markBpmValidity()) {
+    showGuidance();
+    bpmInput.focus();
+    return;
+  }
+  const starting = !recordingSequence;
+  const bpm = Number(bpmInput.value);
+  const sequence = inputs.map(() => "");
+  transportPending = true;
+  transport.disabled = true;
+  sequenceRecordButton.disabled = true;
+  if (starting) {
+    selectStep(null);
+    setRecordingStartControls(true);
+  }
+  enqueue(async () => {
+    try {
+      if (!starting) {
+        const state = await send("finish-recording");
+        status.classList.remove("error");
+        updateState(state);
+        return;
+      }
+      setRecordingStartControls(true);
+      if (playing) {
+        const stopped = await send("stop");
+        updateState(stopped);
+        setRecordingStartControls(true);
+      }
+      setSequence(sequence);
+      setConnected(false);
+      await chrome.storage.local.set({ sequence, bpm, randomize: false });
+      await send("metronome", { enabled: true });
+      const state = await send("play", {
+        sequence, bpm, randomize: false, recordingSequence: true,
+        prohibitedPads: [...prohibitedPads], includeEmptySteps,
+        recordedPadTimes: { ...recordedPadTimes }
+      });
+      status.classList.remove("error");
+      updateState(state);
+    } catch (error) {
+      let message = error.message || "could not change sequence recording.";
+      if (starting) {
+        try {
+          await send("metronome", { enabled: false });
+          metronomeInput.checked = false;
+        } catch (cleanupError) {
+          console.error("Could not stop the metronome:", cleanupError);
+          message += `; could not stop the metronome: ${cleanupError.message}`;
+        }
+      }
+      if (tabId !== null) setRecordingStartControls(false);
+      showStatus(message, true);
+    } finally {
+      transportPending = false;
+      if (tabId !== null) {
+        transport.disabled = false;
+        sequenceRecordButton.disabled = false;
+      }
+    }
+  });
+});
+
 form.addEventListener("submit", async event => {
   event.preventDefault();
   if (transportPending) return;
@@ -1012,6 +1159,7 @@ form.addEventListener("submit", async event => {
     if (bpmTimer !== null) applyBpm();
     transportPending = true;
     transport.disabled = true;
+    sequenceRecordButton.disabled = true;
     await enqueue(async () => {
       try {
         const state = await send("stop");
@@ -1022,6 +1170,7 @@ form.addEventListener("submit", async event => {
       } finally {
         transportPending = false;
         transport.disabled = false;
+        sequenceRecordButton.disabled = false;
       }
     });
     return;
@@ -1037,6 +1186,7 @@ form.addEventListener("submit", async event => {
   }
   transportPending = true;
   transport.disabled = true;
+  sequenceRecordButton.disabled = true;
   settings.disabled = true;
   optionsToggle.disabled = true;
   includeEmptyStepsInput.disabled = true;
@@ -1069,6 +1219,7 @@ form.addEventListener("submit", async event => {
     } finally {
       transportPending = false;
       transport.disabled = false;
+      sequenceRecordButton.disabled = false;
       optionsToggle.disabled = false;
       includeEmptyStepsInput.disabled = false;
       for (const button of recordButtons.values()) button.disabled = false;
@@ -1129,13 +1280,24 @@ async function initialize() {
     const port = chrome.tabs.connect(tabId, { name: `${prefix}steps` });
     port.onMessage.addListener(message => {
       if (tabId === null) return;
+      if ("videoPaused" in message) updateVideoPlayback(message.videoPaused);
       if (message.metronomeError) {
-        metronomeInput.checked = false;
+        if (typeof message.playing === "boolean") updateState(message);
+        else metronomeInput.checked = false;
         showStatus(message.metronomeError, true);
         return;
       }
+      if (message.recordingError) {
+        showStatus(message.recordingError, true);
+        return;
+      }
+      if (message.recordingSequence && Number.isInteger(message.recordedStep) &&
+          inputs[message.recordedStep] && Array.isArray(message.sequence)) {
+        inputs[message.recordedStep].value = message.sequence[message.recordedStep];
+      }
       if (transportPending) return;
       if (message.playbackError) updateState(message);
+      else if (message.recordingFinished) updateState(message);
       else if (playing) updateStepIndicator(message);
     });
     port.onDisconnect.addListener(() => {

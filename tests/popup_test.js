@@ -3,12 +3,13 @@ import { createContext, runInContext } from "node:vm";
 
 const source = await Deno.readTextFile(new URL("../popup.js", import.meta.url));
 
-async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [], sendMessage } = {}) {
+async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [], sendMessage, connected = false } = {}) {
   const popup = { id: 1, left, top: 100, width, height: 460 };
   const updates = [];
   const errors = [];
   const storageSets = [];
   let now = 0;
+  let portMessage;
 
   class Element {
     children = [];
@@ -32,8 +33,12 @@ async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [
     setAttribute(name, value) { this.attributes[name] = value; }
     removeAttribute(name) { delete this.attributes[name]; }
     dispatchEvent(event) { this.listeners[event.type]?.(event); }
-    select() {}
-    focus() { document.activeElement = this; this.listeners.focus?.(); }
+    select() { this.focus(); }
+    focus() {
+      if (document.activeElement === this) return;
+      document.activeElement = this;
+      this.listeners.focus?.();
+    }
     contains(element) { return this === element || this.children.some(child => child.contains(element)); }
     scrollIntoView() { this.scrolledIntoView = true; }
     requestSubmit() { this.submissions = (this.submissions || 0) + 1; }
@@ -78,13 +83,22 @@ async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [
   const context = createContext({
     document,
     window: { innerHeight: 460, get innerWidth() { return popup.width; } },
-    location: { search: "" },
+    location: { search: connected ? "?tabId=1" : "" },
+    URL,
     URLSearchParams,
     Event,
+    performance: { timeOrigin: 1000000 },
     Date: { now: () => now },
     console: { error: (...args) => errors.push(args) },
     chrome: {
-      tabs: { sendMessage },
+      tabs: {
+        sendMessage,
+        get: async () => ({ id: 1, url: "https://www.youtube.com/watch?v=first", title: "Video" }),
+        connect: () => ({
+          onMessage: { addListener: listener => { portMessage = listener; } },
+          onDisconnect: { addListener() {} }
+        })
+      },
       storage: {
         local: {
           get: async () => ({ prohibitedPads }),
@@ -101,7 +115,7 @@ async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [
         workArea: { left: 0, top: 0, width: right, height: 900 }
       }] } }
     },
-    setTimeout, clearTimeout
+    setTimeout, clearTimeout, setInterval() {}
   });
   runInContext(source.replace("initialize();", "globalThis.initialized = initialize();"), context);
   await context.initialized;
@@ -110,6 +124,12 @@ async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [
     add: () => elements.get("#add-step").listeners.click(),
     remove: () => elements.get("#remove-step").listeners.click(),
     reset: () => elements.get("#reset").listeners.click(),
+    record: () => elements.get("#sequence-record").listeners.click(),
+    recordButton: elements.get("#sequence-record"),
+    transport: elements.get("#transport"),
+    videoPlayback: elements.get("#video-playback"),
+    toggleVideo: () => elements.get("#video-playback").listeners.click(),
+    emit: message => portMessage(message),
     isPadForbidden: key => runInContext(`prohibitedPads.has("${key}")`, context),
     isPadMarkedForbidden: key => runInContext(
       `padContainers.get("${key}").classList.contains("pad-prohibited")`, context
@@ -121,14 +141,17 @@ async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [
     tap: time => { now = time; elements.get("#tap-tempo").listeners.click(); },
     selectStep: index => runInContext(`selectStep(${index})`, context),
     focusStep: index => steps.children[index].children[0].focus(),
-    pressKey: key => document.listeners.keydown[0]({
-      key, target: document.activeElement, preventDefault() {}
+    pressKey: (key, timeStamp) => document.listeners.keydown[0]({
+      key, timeStamp, target: document.activeElement, preventDefault() {}
     }),
-    clickPad: key => {
+    clickPad: (key, event = { detail: 1 }) => {
       const button = elements.get("#pads").children["1234567890".indexOf(key)].children[0];
       button.focus();
-      return button.listeners.click();
+      return button.listeners.click(event);
     },
+    pressPad: (key, timeStamp) =>
+      elements.get("#pads").children["1234567890".indexOf(key)].children[0]
+        .listeners.pointerdown({ button: 0, timeStamp }),
     form: elements.get("#sequencer"),
     activeElement: () => document.activeElement,
     updateState: state => { context.testState = state; runInContext("updateState(testState)", context); },
@@ -304,7 +327,7 @@ Deno.test("assigning pads advances the selected step with mouse and keyboard", a
   await app.clickPad("3");
   assert.equal(app.steps.children[1].children[0].value, "3");
   assert.equal(app.steps.children[2].classList.contains("selected"), true);
-  assert.equal(app.steps.children[2].children[0].scrolledIntoView, true);
+  assert.equal(app.activeElement(), app.steps.children[2].children[0]);
 
   await app.clickPad("4");
   assert.equal(app.steps.children[2].children[0].value, "4");
@@ -317,4 +340,165 @@ Deno.test("assigning pads advances the selected step with mouse and keyboard", a
   assert.equal(app.steps.children[7].children[0].value, "5");
   assert.equal(app.steps.children[0].classList.contains("selected"), true);
   assert.equal(app.form.submissions, 1);
+});
+
+Deno.test("record button clears the pattern and leaves playback running after recording", async () => {
+  const messages = [];
+  const app = await setup({
+    sendMessage: async (_tab, message) => {
+      messages.push(message);
+      if (message.type.endsWith(":metronome")) return { ok: true, metronomeEnabled: message.enabled };
+      if (message.type.endsWith(":play")) {
+        return {
+          ok: true, playing: true, sequence: message.sequence, bpm: message.bpm,
+          currentStep: 0, stepSerial: 1, recordingSequence: true, metronomeEnabled: true
+        };
+      }
+      if (message.type.endsWith(":finish-recording")) {
+        return { ok: true, playing: true, recordingSequence: false, metronomeEnabled: false };
+      }
+      return { ok: true };
+    }
+  });
+  app.connect();
+  app.updateState({ playing: false });
+  app.record();
+  await app.settle();
+  assert.deepEqual(messages.map(message => message.type), [
+    "yt-step-sequencer:metronome", "yt-step-sequencer:play"
+  ]);
+  assert.equal(messages[1].recordingSequence, true);
+  assert.deepEqual([...messages[1].sequence], Array(8).fill(""));
+  assert.ok(app.storageSets.some(value => value.sequence?.every(step => step === "")));
+  assert.equal(app.recordButton.attributes["aria-pressed"], "true");
+  assert.equal(app.metronome.checked, true);
+  assert.equal(app.metronome.disabled, true);
+
+  app.selectStep(3);
+  await app.clickPad("5");
+  assert.equal(app.steps.children[3].children[0].value, "");
+  assert.equal(app.steps.children[3].classList.contains("selected"), true);
+
+  app.record();
+  await app.settle();
+  assert.equal(messages.at(-1).type, "yt-step-sequencer:finish-recording");
+  assert.equal(app.recordButton.attributes["aria-pressed"], "false");
+  assert.equal(app.metronome.checked, false);
+  assert.equal(app.metronome.disabled, false);
+  assert.equal(app.transport.attributes["aria-label"], "stop");
+});
+
+Deno.test("reopened window follows recording state and recorded step updates", async () => {
+  const app = await setup({
+    connected: true,
+    sendMessage: async (_tab, message) => {
+      if (message.type.endsWith(":status")) {
+        return {
+          ok: true, playing: true, recordingSequence: true, metronomeEnabled: true,
+          sequence: ["2", "", "", ""], bpm: 120, currentStep: 1, stepSerial: 2
+        };
+      }
+      return { ok: true };
+    }
+  });
+  assert.equal(app.recordButton.attributes["aria-pressed"], "true");
+  assert.equal(app.steps.children[0].children[0].value, "2");
+  app.emit({ recordingSequence: true, recordedStep: 2, sequence: ["2", "", "7", ""], currentStep: 2, stepSerial: 3 });
+  assert.equal(app.steps.children[2].children[0].value, "7");
+  assert.equal(app.steps.children[2].classList.contains("active"), true);
+  app.emit({ playing: true, recordingSequence: false, metronomeEnabled: false, recordingFinished: true });
+  assert.equal(app.recordButton.attributes["aria-pressed"], "false");
+  assert.equal(app.metronome.checked, false);
+  assert.equal(app.transport.attributes["aria-label"], "stop");
+});
+
+Deno.test("recording sends pad press timestamps without triggering twice on mouse release", async () => {
+  const messages = [];
+  const app = await setup({
+    sendMessage: async (_tab, message) => { messages.push(message); return { ok: true }; }
+  });
+  app.connect();
+  app.updateState({ playing: true, recordingSequence: true, metronomeEnabled: true });
+  app.pressPad("5", 123);
+  await app.clickPad("5", { detail: 1, timeStamp: 223 });
+  app.pressKey("6", 300);
+  await app.clickPad("7", { detail: 0, timeStamp: 400 });
+  assert.deepEqual(messages.map(message => [message.key, message.pressedAt]), [
+    ["5", 1000123], ["6", 1000300], ["7", 1000400]
+  ]);
+});
+
+Deno.test("video icon follows playback state and reports toggle errors", async () => {
+  const messages = [];
+  let fail = false;
+  const app = await setup({
+    sendMessage: async (_tab, message) => {
+      messages.push(message);
+      if (fail) return { ok: false, error: "video blocked" };
+      return { ok: true, playing: true, videoPaused: true };
+    }
+  });
+  app.connect();
+  app.updateState({ playing: true, videoPaused: false });
+  assert.equal(app.videoPlayback.attributes["aria-label"], "pause video");
+  app.toggleVideo();
+  assert.equal(app.videoPlayback.disabled, true);
+  await app.settle();
+  assert.equal(messages.at(-1).type, "yt-step-sequencer:video-toggle");
+  assert.equal(app.videoPlayback.attributes["aria-label"], "play video");
+  assert.equal(app.videoPlayback.disabled, false);
+  fail = true;
+  app.toggleVideo();
+  await app.settle();
+  assert.equal(app.status.textContent, "video blocked");
+  assert.equal(app.videoPlayback.disabled, false);
+  app.updateState({ playing: true, videoPaused: null });
+  assert.equal(app.videoPlayback.disabled, true);
+});
+
+Deno.test("starting recording during playback restarts with a cleared pattern", async () => {
+  const messages = [];
+  const app = await setup({
+    sendMessage: async (_tab, message) => {
+      messages.push(message);
+      if (message.type.endsWith(":stop")) {
+        return { ok: true, playing: false, recordingSequence: false, metronomeEnabled: false };
+      }
+      if (message.type.endsWith(":metronome")) return { ok: true, metronomeEnabled: true };
+      return {
+        ok: true, playing: true, sequence: message.sequence, bpm: message.bpm,
+        currentStep: 0, stepSerial: 2, recordingSequence: true, metronomeEnabled: true
+      };
+    }
+  });
+  app.connect();
+  app.updateState({ playing: true, currentStep: 3, stepSerial: 1 });
+  app.record();
+  await app.settle();
+  assert.deepEqual(messages.map(message => message.type), [
+    "yt-step-sequencer:stop", "yt-step-sequencer:metronome", "yt-step-sequencer:play"
+  ]);
+  assert.deepEqual([...messages[2].sequence], Array(8).fill(""));
+  assert.equal(app.steps.children[0].classList.contains("active"), true);
+});
+
+Deno.test("recording reports a metronome startup failure and leaves controls usable", async () => {
+  const messages = [];
+  const app = await setup({
+    sendMessage: async (_tab, message) => {
+      messages.push(message);
+      if (message.type.endsWith(":metronome") && message.enabled) {
+        return { ok: false, error: "audio blocked" };
+      }
+      return { ok: true, metronomeEnabled: false };
+    }
+  });
+  app.connect();
+  app.updateState({ playing: false });
+  app.record();
+  await app.settle();
+  assert.equal(app.status.textContent, "audio blocked");
+  assert.equal(app.recordButton.disabled, false);
+  assert.equal(app.metronome.checked, false);
+  assert.deepEqual(messages.map(message => message.enabled), [true, false]);
 });

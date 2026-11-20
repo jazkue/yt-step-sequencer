@@ -26,7 +26,13 @@
           </div>
         </div>
       </div>
-      <p id="video-title"></p>
+      <div id="video-info">
+        <button id="video-playback" type="button" aria-label="play video" title="play video" disabled>
+          <svg class="play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4v16l13-8z"></path></svg>
+          <svg class="pause-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h4v16H6zm8 0h4v16h-4z"></path></svg>
+        </button>
+        <p id="video-title"></p>
+      </div>
 
       <div class="sequencer-layout">
         <form id="sequencer" novalidate>
@@ -42,8 +48,8 @@
               </button>
             </div>
             <div class="link" id="link">
-              <svg viewBox="0 0 16 42" aria-hidden="true">
-                <path d="M16 1H5v40h11"></path>
+              <svg viewBox="0 0 16 42" preserveAspectRatio="none" aria-hidden="true">
+                <path d="M16 0H5v42h11"></path>
               </svg>
               <input id="connect" type="checkbox"
                 aria-label="randomize on every step 1"
@@ -74,14 +80,19 @@
                 </svg>
               </label>
             </div>
-            <button id="transport" type="submit" aria-label="play" title="play">
-              <svg class="play-icon" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M7 4v16l13-8z"></path>
-              </svg>
-              <svg class="stop-icon" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M5 5h14v14H5z"></path>
-              </svg>
-            </button>
+            <div class="transport-controls">
+              <button id="sequence-record" type="button" aria-label="record sequence" aria-pressed="false" title="record sequence">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"></circle></svg>
+              </button>
+              <button id="transport" type="submit" aria-label="play" title="play">
+                <svg class="play-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M7 4v16l13-8z"></path>
+                </svg>
+                <svg class="stop-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M5 5h14v14H5z"></path>
+                </svg>
+              </button>
+            </div>
           </div>
         </form>
         <p id="status" role="status" aria-live="polite"></p>

@@ -3,16 +3,21 @@ import { runInNewContext } from "node:vm";
 
 const source = await Deno.readTextFile(new URL("../content.js", import.meta.url));
 
-function setup({ random = Math.random, audioState = "running", audioResumeError = null, audioResumePending = false } = {}) {
+function setup({ random = Math.random, audioState = "running", audioResumeError = null, audioResumePending = false, saveSequence } = {}) {
   let now = 0;
   let timerId = 0;
   const timers = new Map();
   const events = [];
   const notes = [];
+  const savedSequences = [];
   let audio;
   const handlers = {};
   const location = { href: "https://www.youtube.com/watch?v=first" };
-  const video = { paused: false, muted: false, currentTime: 0, duration: 100, play: () => Promise.resolve() };
+  const video = {
+    paused: false, muted: false, currentTime: 0, duration: 100,
+    pause() { this.paused = true; },
+    play() { this.paused = false; return Promise.resolve(); }
+  };
   let player = {
     dispatchEvent: event => events.push(event),
     querySelector: selector => selector === "video" ? video : null
@@ -55,15 +60,21 @@ function setup({ random = Math.random, audioState = "running", audioResumeError 
   math.random = random;
   runInNewContext(source, {
     URL, location, KeyboardEvent, AudioContext, Math: math,
-    performance: { now: () => now },
+    performance: { timeOrigin: 1000000, now: () => now },
     document: {
       querySelector: () => player,
       addEventListener: (type, handler) => { handlers[type] = handler; }
     },
-    chrome: { runtime: {
-      onMessage: { addListener: fn => { listener = fn; } },
-      onConnect: { addListener: fn => { connectListener = fn; } }
-    } },
+    chrome: {
+      runtime: {
+        onMessage: { addListener: fn => { listener = fn; } },
+        onConnect: { addListener: fn => { connectListener = fn; } }
+      },
+      storage: { local: { set: async value => {
+        if (saveSequence) await saveSequence(value.sequence);
+        savedSequences.push([...value.sequence]);
+      } } }
+    },
     console,
     setTimeout: (callback, delay) => {
       const id = ++timerId;
@@ -74,7 +85,7 @@ function setup({ random = Math.random, audioState = "running", audioResumeError 
   });
 
   return {
-    events, location, video, notes,
+    events, location, video, notes, savedSequences,
     suspendAudio() { audio.state = "suspended"; },
     connect() {
       const updates = [];
@@ -104,6 +115,8 @@ function setup({ random = Math.random, audioState = "running", audioResumeError 
         timer.callback();
       }
     },
+    setTime(time) { now = time; },
+    videoEvent(type) { handlers[type]({ target: video }); },
     navigate(url) {
       location.href = url;
       handlers["yt-navigate-finish"]();
@@ -115,6 +128,353 @@ function setup({ random = Math.random, audioState = "running", audioResumeError 
 }
 
 const sequence = ["0", "1", "2", "3", "4", "5", "6", "9"];
+
+Deno.test("video control pauses independently of the sequencer and a pad resumes it", async () => {
+  const app = setup();
+  const observer = app.connect();
+  app.send("play", { sequence: ["1", "2"], bpm: 120 });
+  const paused = app.send("video-toggle");
+  assert.equal(paused.videoPaused, true);
+  assert.equal(paused.playing, true);
+  app.advance(500);
+  assert.equal(app.video.paused, true);
+  assert.equal(app.send("status").currentStep, 1);
+  await app.sendAsync("trigger", { key: "3" });
+  assert.equal(app.video.paused, false);
+  assert.equal(app.send("status").playing, true);
+  app.send("video-toggle");
+  const playing = await app.sendAsync("video-toggle");
+  assert.equal(playing.videoPaused, false);
+  assert.equal(observer.updates.at(-1).videoPaused, false);
+});
+
+Deno.test("video control reports playback failure and tracks YouTube playback changes", async () => {
+  const app = setup();
+  const observer = app.connect();
+  app.video.paused = true;
+  app.video.play = () => Promise.reject(new Error("blocked"));
+  const result = await app.sendAsync("video-toggle");
+  assert.equal(result.ok, false);
+  assert.match(result.error, /Could not start the video/);
+  assert.equal(app.send("status").videoPaused, true);
+  app.video.paused = false;
+  app.videoEvent("play");
+  assert.equal(observer.updates.at(-1).videoPaused, false);
+  app.removeVideo();
+  assert.equal(app.send("video-toggle").ok, false);
+  assert.equal(app.send("status").videoPaused, null);
+});
+
+Deno.test("video pause overrides an in-flight automatic resume", async () => {
+  const app = setup();
+  app.send("play", { sequence: ["", ""], bpm: 120 });
+  app.video.paused = true;
+  let rejectPlay;
+  app.video.play = () => {
+    app.video.paused = false;
+    return new Promise((_resolve, reject) => { rejectPlay = reject; });
+  };
+  app.advance(500);
+  app.send("video-toggle");
+  rejectPlay(new Error("interrupted"));
+  await Promise.resolve();
+  app.advance(1000);
+  assert.equal(app.video.paused, true);
+  assert.equal(app.send("status").playing, true);
+});
+
+Deno.test("video control works during recording without overriding an explicit pause", async () => {
+  const app = setup();
+  await app.sendAsync("metronome", { enabled: true });
+  app.send("play", { sequence: ["", ""], bpm: 120, recordingSequence: true });
+  assert.equal(app.video.paused, true);
+  await app.sendAsync("video-toggle");
+  assert.equal(app.video.paused, false);
+  app.send("video-toggle");
+  await app.sendAsync("finish-recording");
+  app.advance(500);
+  assert.equal(app.video.paused, true);
+  assert.equal(app.send("status").playing, true);
+  await app.sendAsync("video-toggle");
+  assert.equal(app.video.paused, false);
+});
+
+Deno.test("recording quantizes pad presses to the nearest beat across the loop boundary", async () => {
+  for (const [pressTime, expectedStep] of [[1749, 3], [1750, 0], [1950, 0], [2000, 0], [2249, 0]]) {
+    const app = setup();
+    const observer = app.connect();
+    await app.sendAsync("metronome", { enabled: true });
+    app.send("play", { sequence: ["", "", "", ""], bpm: 120, recordingSequence: true });
+    for (const time of [500, 1000, 1500]) app.advance(time);
+    if (pressTime >= 2000) app.advance(2000);
+    app.setTime(pressTime);
+    await app.sendAsync("trigger", { key: "7", pressedAt: 1000000 + pressTime });
+    assert.equal(observer.updates.at(-1).recordedStep, expectedStep);
+    assert.equal(app.send("status").sequence[expectedStep], "7");
+  }
+});
+
+Deno.test("recording uses press time when the pad message arrives after a beat", async () => {
+  const app = setup();
+  await app.sendAsync("metronome", { enabled: true });
+  app.send("play", { sequence: ["", "", "", ""], bpm: 120, recordingSequence: true });
+  for (const time of [500, 1000, 1500, 2000]) app.advance(time);
+  app.setTime(2050);
+  await app.sendAsync("trigger", { key: "3", pressedAt: 1001740 });
+  assert.deepEqual([...app.send("status").sequence], ["", "", "", "3"]);
+  await app.sendAsync("trigger", { key: "4", pressedAt: 1001980 });
+  assert.deepEqual([...app.send("status").sequence], ["4", "", "", "3"]);
+  assert.equal(app.send("trigger", { key: "4", pressedAt: -1 }).ok, false);
+});
+
+Deno.test("recording quantization follows tempo changes and supports a single step", async () => {
+  const app = setup();
+  await app.sendAsync("metronome", { enabled: true });
+  app.send("play", { sequence: ["", ""], bpm: 120, recordingSequence: true });
+  app.setTime(100);
+  app.send("update", { bpm: 60 });
+  app.setTime(449);
+  await app.sendAsync("trigger", { key: "1" });
+  app.setTime(450);
+  await app.sendAsync("trigger", { key: "2" });
+  assert.deepEqual([...app.send("status").sequence], ["1", "2"]);
+
+  const single = setup();
+  await single.sendAsync("metronome", { enabled: true });
+  single.send("play", { sequence: [""], bpm: 120, recordingSequence: true });
+  single.setTime(490);
+  await single.sendAsync("trigger", { key: "9" });
+  assert.deepEqual([...single.send("status").sequence], ["9"]);
+});
+
+Deno.test("recording pauses the video until a pad is played while the metronome advances", async () => {
+  for (const initiallyPaused of [false, true]) {
+    const app = setup();
+    app.video.paused = initiallyPaused;
+    let pauses = 0;
+    let plays = 0;
+    app.video.pause = () => { pauses++; app.video.paused = true; };
+    app.video.play = () => { plays++; app.video.paused = false; return Promise.resolve(); };
+    const observer = app.connect();
+    await app.sendAsync("metronome", { enabled: true });
+    const started = app.send("play", { sequence: ["", "", ""], bpm: 120, recordingSequence: true });
+    assert.equal(started.playing, true);
+    assert.equal(app.video.paused, true);
+    assert.equal(pauses, initiallyPaused ? 0 : 1);
+    app.advance(500);
+    app.advance(1000);
+    assert.equal(plays, 0);
+    assert.equal(observer.updates.at(-1).currentStep, 2);
+    assert.deepEqual(app.notes, [1200, 800, 800]);
+    assert.equal((await app.sendAsync("trigger", { key: "4" })).ok, true);
+    assert.equal(app.video.paused, false);
+    assert.equal(app.video.currentTime, 40);
+    assert.equal(plays, 1);
+    assert.deepEqual([...app.send("status").sequence], ["", "", "4"]);
+    app.advance(1500);
+    assert.equal(pauses, initiallyPaused ? 0 : 1);
+    assert.equal(plays, 1);
+    app.video.paused = true;
+    app.advance(2000);
+    assert.equal(plays, 2);
+    await app.sendAsync("stop");
+  }
+});
+
+Deno.test("recording waits for a successful pad playback before automatic video resumption", async () => {
+  const app = setup();
+  await app.sendAsync("metronome", { enabled: true });
+  app.send("play", { sequence: ["", ""], bpm: 120, recordingSequence: true });
+  let rejectPlay;
+  let calls = 0;
+  app.video.play = () => {
+    calls++;
+    return new Promise((_resolve, reject) => { rejectPlay = reject; });
+  };
+  const first = app.sendAsync("trigger", { key: "1" });
+  app.advance(500);
+  assert.equal(calls, 1);
+  rejectPlay(new Error("blocked"));
+  assert.equal((await first).ok, false);
+  app.advance(1000);
+  assert.equal(calls, 1);
+  app.video.play = () => { calls++; app.video.paused = false; return Promise.resolve(); };
+  assert.equal((await app.sendAsync("trigger", { key: "2" })).ok, true);
+  app.video.paused = true;
+  app.advance(1500);
+  assert.equal(calls, 3);
+  await app.sendAsync("stop");
+});
+
+Deno.test("stopping recording before a pad does not prevent normal playback", async () => {
+  const app = setup();
+  await app.sendAsync("metronome", { enabled: true });
+  app.send("play", { sequence: [""], bpm: 120, recordingSequence: true });
+  assert.equal(app.video.paused, true);
+  await app.sendAsync("stop");
+  const state = await app.sendAsync("play", { sequence: [""], bpm: 120 });
+  assert.equal(state.playing, true);
+  assert.equal(app.video.paused, false);
+});
+
+Deno.test("finishing recording keeps playing the recorded pattern without the metronome", async () => {
+  const app = setup();
+  const observer = app.connect();
+  await app.sendAsync("metronome", { enabled: true });
+  app.send("play", { sequence: ["", ""], bpm: 120, recordingSequence: true });
+  await app.sendAsync("trigger", { key: "4" });
+  app.advance(500);
+  const finished = await app.sendAsync("finish-recording");
+  assert.equal(finished.playing, true);
+  assert.equal(finished.recordingSequence, false);
+  assert.equal(finished.metronomeEnabled, false);
+  assert.equal(finished.currentStep, 1);
+  assert.equal(observer.updates.at(-1).recordingFinished, true);
+  assert.deepEqual(app.savedSequences.at(-1), ["4", ""]);
+  app.video.currentTime = 0;
+  app.advance(1000);
+  assert.equal(app.video.currentTime, 40);
+  assert.equal(app.send("status").currentStep, 0);
+  assert.deepEqual(app.notes, [1200, 800]);
+  await app.sendAsync("trigger", { key: "7" });
+  assert.deepEqual([...app.send("status").sequence], ["4", ""]);
+});
+
+Deno.test("finishing recording before a pad resumes the video and waits for pending saves", async () => {
+  const empty = setup();
+  await empty.sendAsync("metronome", { enabled: true });
+  empty.send("play", { sequence: [""], bpm: 120, recordingSequence: true });
+  assert.equal(empty.video.paused, true);
+  const finished = await empty.sendAsync("finish-recording");
+  assert.equal(finished.playing, true);
+  assert.equal(empty.video.paused, false);
+
+  let release;
+  const app = setup({ saveSequence: () => new Promise(resolve => { release = resolve; }) });
+  await app.sendAsync("metronome", { enabled: true });
+  app.send("play", { sequence: [""], bpm: 120, recordingSequence: true });
+  app.send("trigger", { key: "7" });
+  await Promise.resolve();
+  let completed = false;
+  const finishing = app.sendAsync("finish-recording").then(result => { completed = true; return result; });
+  await Promise.resolve();
+  assert.equal(completed, false);
+  release();
+  assert.equal((await finishing).playing, true);
+  assert.deepEqual(app.savedSequences.at(-1), ["7"]);
+});
+
+Deno.test("finishing recording reports save failures while playback continues", async () => {
+  const app = setup({ saveSequence: async () => { throw new Error("storage failed"); } });
+  await app.sendAsync("metronome", { enabled: true });
+  app.send("play", { sequence: [""], bpm: 120, recordingSequence: true });
+  await app.sendAsync("trigger", { key: "2" });
+  const finished = await app.sendAsync("finish-recording");
+  assert.equal(finished.playing, true);
+  assert.equal(finished.recordingError, "storage failed");
+  app.advance(500);
+  assert.equal(app.video.currentTime, 20);
+});
+
+Deno.test("sequence recording captures the current step, overdubs, persists, and stops", async () => {
+  const app = setup();
+  const observer = app.connect();
+  await app.sendAsync("metronome", { enabled: true });
+  const started = app.send("play", {
+    sequence: ["", "", ""], bpm: 120, randomize: true, recordingSequence: true
+  });
+  assert.equal(started.recordingSequence, true);
+  assert.equal(started.randomizeOnStart, false);
+  app.send("trigger", { key: "2" });
+  app.send("trigger", { key: "3" });
+  app.advance(500);
+  app.send("trigger", { key: "4" });
+  assert.deepEqual([...app.send("status").sequence], ["3", "4", ""]);
+  assert.equal(observer.updates.at(-1).recordedStep, 1);
+  observer.disconnect();
+  app.advance(1000);
+  app.advance(1500);
+  app.send("trigger", { key: "5" });
+  assert.deepEqual([...app.send("status").sequence], ["5", "4", ""]);
+  assert.equal(app.send("status").recordingSequence, true);
+  const stopped = await app.sendAsync("stop");
+  assert.equal(stopped.playing, false);
+  assert.equal(stopped.recordingSequence, false);
+  assert.equal(stopped.metronomeEnabled, false);
+  assert.deepEqual(app.savedSequences.at(-1), ["5", "4", ""]);
+  assert.deepEqual(app.notes, [1200, 800, 800, 1200]);
+});
+
+Deno.test("sequence recording requires metronome and rejects forbidden pads", async () => {
+  const app = setup();
+  assert.equal(app.send("play", {
+    sequence: [""], bpm: 120, recordingSequence: true
+  }).ok, false);
+  await app.sendAsync("metronome", { enabled: true });
+  app.send("prohibited", { prohibitedPads: ["4"] });
+  app.send("play", { sequence: [""], bpm: 120, recordingSequence: true });
+  assert.equal(app.send("metronome", { enabled: false }).ok, false);
+  assert.equal(app.send("trigger", { key: "4" }).ok, false);
+  assert.deepEqual([...app.send("status").sequence], [""]);
+  app.advance(500);
+  assert.equal(app.video.paused, true);
+  await app.sendAsync("stop");
+});
+
+Deno.test("stopping recording waits for the recorded pattern to be saved", async () => {
+  let release;
+  const app = setup({ saveSequence: () => new Promise(resolve => { release = resolve; }) });
+  await app.sendAsync("metronome", { enabled: true });
+  app.send("play", { sequence: [""], bpm: 120, recordingSequence: true });
+  app.send("trigger", { key: "7" });
+  await Promise.resolve();
+  let completed = false;
+  const stopping = app.sendAsync("stop").then(result => { completed = true; return result; });
+  await Promise.resolve();
+  assert.equal(completed, false);
+  release();
+  assert.equal((await stopping).recordingSequence, false);
+  assert.deepEqual(app.savedSequences.at(-1), ["7"]);
+});
+
+Deno.test("manual edits and recorded pads are saved in their original order", async () => {
+  const app = setup();
+  await app.sendAsync("metronome", { enabled: true });
+  app.send("play", { sequence: ["", ""], bpm: 120, recordingSequence: true });
+  app.send("trigger", { key: "2" });
+  app.send("update", { step: 1, value: "8" });
+  app.advance(500);
+  app.send("trigger", { key: "4" });
+  await app.sendAsync("stop");
+  assert.deepEqual(app.savedSequences, [["2", ""], ["2", "8"], ["2", "4"]]);
+});
+
+Deno.test("recording reports a failed save when stopped", async () => {
+  const app = setup({ saveSequence: async () => { throw new Error("storage failed"); } });
+  const observer = app.connect();
+  await app.sendAsync("metronome", { enabled: true });
+  app.send("play", { sequence: [""], bpm: 120, recordingSequence: true });
+  app.send("trigger", { key: "2" });
+  const stopped = await app.sendAsync("stop");
+  assert.equal(stopped.playing, false);
+  assert.equal(stopped.recordingError, "storage failed");
+  assert.equal(observer.updates.at(-1).recordingError, "storage failed");
+});
+
+Deno.test("recording stops and reports metronome failure", async () => {
+  const app = setup();
+  const observer = app.connect();
+  await app.sendAsync("metronome", { enabled: true });
+  app.send("play", { sequence: ["", ""], bpm: 120, recordingSequence: true });
+  app.suspendAudio();
+  app.advance(500);
+  const failure = observer.updates.at(-1);
+  assert.equal(failure.playing, false);
+  assert.equal(failure.recordingSequence, false);
+  assert.equal(failure.metronomeEnabled, false);
+  assert.ok(failure.metronomeError);
+  assert.equal(app.pending(), 0);
+});
 
 Deno.test("metronome follows sequence steps and keeps playing without an observer", async () => {
   const app = setup();
