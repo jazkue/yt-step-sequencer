@@ -6,9 +6,9 @@
   let currentStep = -1;
   let nextStep = 0;
   let nextTime = 0;
-  let currentBeatTime = null;
-  let previousBeatTime = null;
-  let previousBeatStep = null;
+  let recordedBeats = [];
+  let metronomeDelay = 0;
+  let warnedAboutAudioTiming = false;
   let videoId = null;
   let generation = 0;
   let stepSerial = 0;
@@ -52,9 +52,8 @@
     sequence = null;
     bpm = null;
     currentStep = -1;
-    currentBeatTime = null;
-    previousBeatTime = null;
-    previousBeatStep = null;
+    recordedBeats = [];
+    metronomeDelay = 0;
     stepValue = null;
     padValue = null;
     randomizeOnStart = false;
@@ -136,11 +135,34 @@
 
   function recordingStep(pressedAt) {
     const time = pressedAt === undefined ? performance.now() : pressedAt - performance.timeOrigin;
-    if (previousBeatTime !== null && previousBeatStep < sequence.length &&
-        Math.abs(time - previousBeatTime) < Math.abs(time - currentBeatTime)) {
-      return previousBeatStep;
+    let closest = nextTime > performance.now() ? { step: nextStep, time: nextTime + metronomeDelay } : null;
+    for (const beat of recordedBeats) {
+      if (beat.step < sequence.length && (!closest ||
+          (Math.abs(time - beat.time) < Math.abs(time - closest.time) ||
+           (Math.abs(time - beat.time) === Math.abs(time - closest.time) && beat.time > closest.time)))) {
+        closest = beat;
+      }
     }
-    return Math.abs(time - nextTime) <= Math.abs(time - currentBeatTime) ? nextStep : currentStep;
+    return closest ? closest.step : currentStep;
+  }
+
+  function metronomeOutputTime(contextTime, scheduledAt) {
+    const timestamp = metronomeAudio.getOutputTimestamp?.();
+    if (timestamp && Number.isFinite(timestamp.contextTime) && Number.isFinite(timestamp.performanceTime) &&
+        (timestamp.contextTime !== 0 || timestamp.performanceTime !== 0)) {
+      // Map the scheduled audio time onto the performance clock used by pad events.
+      return Math.max(scheduledAt, timestamp.performanceTime + (contextTime - timestamp.contextTime) * 1000);
+    }
+    const baseLatency = metronomeAudio.baseLatency;
+    const outputLatency = metronomeAudio.outputLatency;
+    if (!Number.isFinite(baseLatency) && !Number.isFinite(outputLatency) && !warnedAboutAudioTiming) {
+      console.warn("Metronome output timing is unavailable; recording uses the scheduled beat time.");
+      warnedAboutAudioTiming = true;
+    }
+    return scheduledAt + 1000 * (
+      (Number.isFinite(baseLatency) ? Math.max(0, baseLatency) : 0) +
+      (Number.isFinite(outputLatency) ? Math.max(0, outputLatency) : 0)
+    );
   }
 
   function notifyObservers(message) {
@@ -178,8 +200,10 @@
       gain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
       oscillator.connect(gain);
       gain.connect(metronomeAudio.destination);
+      const scheduledAt = performance.now();
       oscillator.start(now);
       oscillator.stop(now + 0.05);
+      if (recordingSequence) return metronomeOutputTime(now, scheduledAt);
     } catch (error) {
       metronomeEnabled = false;
       console.error("Could not play the metronome:", error);
@@ -222,9 +246,6 @@
     const interval = 60000 / bpm;
     const startTime = performance.now();
     if (startTime - nextTime >= interval) timingDelays++;
-    previousBeatTime = currentBeatTime;
-    previousBeatStep = currentStep;
-    currentBeatTime = startTime;
     currentStep = nextStep;
     nextStep = (nextStep + 1) % sequence.length;
     const randomizedSequence = randomizeOnStart && currentStep === 0 ? randomSequence() : null;
@@ -240,8 +261,14 @@
       padValue = stepValue;
     }
     stepSerial++;
-    playMetronome(currentStep);
+    const heardAt = playMetronome(currentStep);
     if (!sequence) return;
+    if (recordingSequence) {
+      recordedBeats.push({ step: currentStep, time: heardAt });
+      // Keep enough history for audio and input delays without growing indefinitely.
+      if (recordedBeats.length > 256) recordedBeats.shift();
+      metronomeDelay = Math.max(0, heardAt - startTime);
+    }
     notifyObservers({
       currentStep, stepValue, padValue, stepSerial, timingDelays,
       ...(randomized && { sequence, randomized })

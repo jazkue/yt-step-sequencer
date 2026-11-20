@@ -3,7 +3,10 @@ import { runInNewContext } from "node:vm";
 
 const source = await Deno.readTextFile(new URL("../content.js", import.meta.url));
 
-function setup({ random = Math.random, audioState = "running", audioResumeError = null, audioResumePending = false, saveSequence } = {}) {
+function setup({
+  random = Math.random, audioState = "running", audioResumeError = null, audioResumePending = false,
+  audioLatency = 0, timestampAvailable = true, baseLatency, outputLatency, saveSequence
+} = {}) {
   let now = 0;
   let timerId = 0;
   const timers = new Map();
@@ -34,9 +37,16 @@ function setup({ random = Math.random, audioState = "running", audioResumeError 
 
   class AudioContext {
     state = audioState;
-    currentTime = 0;
+    get currentTime() { return 10 + now / 1000; }
+    baseLatency = baseLatency;
+    outputLatency = outputLatency;
     destination = {};
     constructor() { audio = this; }
+    getOutputTimestamp() {
+      return timestampAvailable
+        ? { contextTime: 10 + (now - audioLatency) / 1000, performanceTime: now }
+        : null;
+    }
     async resume() {
       if (audioResumeError) throw new Error(audioResumeError);
       if (audioResumePending) return new Promise(() => {});
@@ -298,6 +308,53 @@ Deno.test("recording quantizes pad presses to the nearest beat across the loop b
     assert.equal(observer.updates.at(-1).recordedStep, expectedStep);
     assert.equal(app.send("status").sequence[expectedStep], "7");
   }
+});
+
+Deno.test("recording follows audible beats with tolerance despite output and message latency", async () => {
+  for (const [pressTime, expectedStep] of [[660, 0], [700, 0], [740, 0], [751, 1]]) {
+    const app = setup({ audioLatency: 300 });
+    const observer = app.connect();
+    await app.sendAsync("metronome", { enabled: true });
+    app.send("play", { sequence: ["", "", "", ""], bpm: 600, recordingSequence: true });
+    for (let time = 100; time <= 800; time += 100) app.advance(time);
+    await app.sendAsync("trigger", { key: "7", pressedAt: 1000000 + pressTime });
+    assert.equal(observer.updates.at(-1).recordedStep, expectedStep, `press at ${pressTime}ms`);
+    assert.equal(app.send("status").sequence[expectedStep], "7");
+  }
+});
+
+Deno.test("recording uses actual delayed metronome timing and predicts the next audible beat", async () => {
+  for (const [pressTime, expectedStep] of [[870, 1], [880, 0]]) {
+    const app = setup({ audioLatency: 100 });
+    const observer = app.connect();
+    await app.sendAsync("metronome", { enabled: true });
+    app.send("play", { sequence: ["", ""], bpm: 120, recordingSequence: true });
+    app.advance(550);
+    app.setTime(pressTime);
+    await app.sendAsync("trigger", { key: "6" });
+    assert.equal(observer.updates.at(-1).recordedStep, expectedStep);
+  }
+});
+
+Deno.test("recording does not use a predicted beat whose timer has not fired", async () => {
+  const app = setup();
+  const observer = app.connect();
+  await app.sendAsync("metronome", { enabled: true });
+  app.send("play", { sequence: ["", ""], bpm: 120, recordingSequence: true });
+  app.advance(500);
+  app.setTime(1100);
+  await app.sendAsync("trigger", { key: "6" });
+  assert.equal(observer.updates.at(-1).recordedStep, 1);
+});
+
+Deno.test("recording estimates audible beats from latency values when output timestamps are unavailable", async () => {
+  const app = setup({ timestampAvailable: false, baseLatency: 0.05, outputLatency: 0.25 });
+  const observer = app.connect();
+  await app.sendAsync("metronome", { enabled: true });
+  app.send("play", { sequence: ["", "", "", ""], bpm: 600, recordingSequence: true });
+  for (let time = 100; time <= 700; time += 100) app.advance(time);
+  await app.sendAsync("trigger", { key: "3" });
+  assert.equal(observer.updates.at(-1).recordedStep, 0);
 });
 
 Deno.test("recording uses press time when the pad message arrives after a beat", async () => {
