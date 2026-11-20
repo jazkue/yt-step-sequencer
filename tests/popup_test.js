@@ -3,16 +3,18 @@ import { createContext, runInContext } from "node:vm";
 
 const source = await Deno.readTextFile(new URL("../popup.js", import.meta.url));
 
-async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [] } = {}) {
+async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [], sendMessage } = {}) {
   const popup = { id: 1, left, top: 100, width, height: 460 };
   const updates = [];
   const errors = [];
   const storageSets = [];
+  let now = 0;
 
   class Element {
     children = [];
     listeners = {};
     dataset = {};
+    attributes = {};
     classList = {
       values: new Set(),
       add(value) { this.values.add(value); },
@@ -27,8 +29,8 @@ async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [
     value = "";
 
     addEventListener(type, listener) { this.listeners[type] = listener; }
-    setAttribute() {}
-    removeAttribute() {}
+    setAttribute(name, value) { this.attributes[name] = value; }
+    removeAttribute(name) { delete this.attributes[name]; }
     append(...children) {
       for (const child of children) {
         child.parentElement = this;
@@ -68,8 +70,10 @@ async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [
     window: { innerHeight: 460, get innerWidth() { return popup.width; } },
     location: { search: "" },
     URLSearchParams,
+    Date: { now: () => now },
     console: { error: (...args) => errors.push(args) },
     chrome: {
+      tabs: { sendMessage },
       storage: {
         local: {
           get: async () => ({ prohibitedPads }),
@@ -99,6 +103,12 @@ async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [
     isPadMarkedForbidden: key => runInContext(
       `padContainers.get("${key}").classList.contains("pad-prohibited")`, context
     ),
+    connect: () => runInContext("tabId = 1", context),
+    metronome: elements.get("#metronome"),
+    bpm: elements.get("#bpm"),
+    status: elements.get("#status"),
+    tap: time => { now = time; elements.get("#tap-tempo").listeners.click(); },
+    updateState: state => { context.testState = state; runInContext("updateState(testState)", context); },
     settle: () => runInContext("commandQueue", context)
   };
 }
@@ -183,4 +193,68 @@ Deno.test("reset allows all pads and clears their forbidden state", async () => 
   assert.ok(app.storageSets.some(value =>
     Array.isArray(value.prohibitedPads) && value.prohibitedPads.length === 0
   ));
+});
+
+Deno.test("metronome checkbox follows tab state and reports failed changes", async () => {
+  const messages = [];
+  const app = await setup({
+    sendMessage: async (_tab, message) => {
+      messages.push(message);
+      return message.enabled
+        ? { ok: true, metronomeEnabled: true }
+        : { ok: false, error: "audio error" };
+    }
+  });
+  app.connect();
+  app.updateState({ playing: false, metronomeEnabled: true });
+  assert.equal(app.metronome.checked, true);
+  app.metronome.checked = false;
+  app.metronome.listeners.change();
+  await app.settle();
+  assert.equal(messages[0].type, "yt-step-sequencer:metronome");
+  assert.equal(messages[0].enabled, false);
+  assert.equal(app.metronome.checked, true);
+  assert.equal(app.status.textContent, "audio error");
+  app.metronome.checked = true;
+  app.metronome.listeners.change();
+  await app.settle();
+  assert.equal(app.metronome.checked, true);
+  assert.equal(messages[1].enabled, true);
+});
+
+Deno.test("tap tempo sends rounded integer BPM while playing", async () => {
+  const messages = [];
+  const app = await setup({
+    sendMessage: async (_tab, message) => {
+      messages.push(message);
+      return { ok: true, playing: true, sequence: ["0"], bpm: message.bpm, currentStep: 0, stepSerial: 1 };
+    }
+  });
+  app.connect();
+  app.updateState({ playing: true, currentStep: 0, stepSerial: 1 });
+  app.tap(1000);
+  app.tap(1523);
+  await app.settle();
+  assert.equal(app.bpm.value, "115");
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].bpm, 115);
+  assert.equal(app.status.classList.contains("error"), false);
+});
+
+Deno.test("BPM entry rejects decimals and tap tempo restores a valid value", async () => {
+  const app = await setup();
+  for (const [value, invalid] of [["0", "true"], ["999", "false"], ["1000", "true"]]) {
+    app.bpm.value = value;
+    app.bpm.listeners.input();
+    assert.equal(app.bpm.attributes["aria-invalid"], invalid);
+  }
+  app.bpm.value = "120.5";
+  app.bpm.listeners.input();
+  assert.equal(app.bpm.attributes["aria-invalid"], "true");
+  assert.match(app.status.textContent, /whole-number/);
+  app.tap(1000);
+  app.tap(1500);
+  assert.equal(app.bpm.value, "120");
+  assert.equal(app.bpm.attributes["aria-invalid"], "false");
+  assert.equal(app.status.classList.contains("error"), false);
 });

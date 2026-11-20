@@ -18,6 +18,9 @@
   let timingDelays = 0;
   let playbackError = null;
   let resumeAttempt = null;
+  let metronomeEnabled = false;
+  let metronomeAudio = null;
+  let metronomeRequest = 0;
   const playbackFailure = "Could not start the video. Press play on YouTube and try again.";
   const observers = new Set();
 
@@ -48,7 +51,7 @@
     return {
       playing: sequence !== null, sequence, bpm, currentStep, stepValue, stepSerial,
       timingDelays, playbackError, padValue, randomizeOnStart, prohibitedPads,
-      includeEmptySteps, recordedPadTimes, videoId: currentVideoId(),
+      includeEmptySteps, recordedPadTimes, metronomeEnabled, videoId: currentVideoId(),
       videoDuration: Number.isFinite(duration) && duration >= 0 ? duration : null
     };
   }
@@ -116,6 +119,27 @@
     }
   }
 
+  function playMetronome(step) {
+    if (!metronomeEnabled) return;
+    try {
+      if (metronomeAudio.state !== "running") throw new Error("Metronome audio is unavailable.");
+      const now = metronomeAudio.currentTime;
+      const oscillator = metronomeAudio.createOscillator();
+      const gain = metronomeAudio.createGain();
+      oscillator.frequency.setValueAtTime(step === 0 ? 1200 : 800, now);
+      gain.gain.setValueAtTime(0.2, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
+      oscillator.connect(gain);
+      gain.connect(metronomeAudio.destination);
+      oscillator.start(now);
+      oscillator.stop(now + 0.05);
+    } catch (error) {
+      metronomeEnabled = false;
+      console.error("Could not play the metronome:", error);
+      notifyObservers({ metronomeEnabled: false, metronomeError: error.message || "Metronome audio is unavailable." });
+    }
+  }
+
   function resumeVideo(video) {
     if (!video.paused || resumeAttempt) return;
     const attempt = { generation, video };
@@ -165,6 +189,7 @@
       padValue = stepValue;
     }
     stepSerial++;
+    playMetronome(currentStep);
     notifyObservers({
       currentStep, stepValue, padValue, stepSerial, timingDelays,
       ...(randomized && { sequence, randomized })
@@ -194,6 +219,51 @@
       }
       sendResponse({ ok: true, ...state() });
       return;
+    }
+    if (message.type === `${MESSAGE_PREFIX}metronome`) {
+      if (typeof message.enabled !== "boolean") {
+        sendResponse({ ok: false, error: "Metronome setting must be on or off." });
+        return;
+      }
+      const request = ++metronomeRequest;
+      if (!message.enabled) {
+        metronomeEnabled = false;
+        sendResponse({ ok: true, metronomeEnabled });
+        return;
+      }
+      (async () => {
+        try {
+          if (!metronomeAudio || metronomeAudio.state === "closed") {
+            metronomeAudio = new AudioContext();
+          }
+          if (metronomeAudio.state !== "running") {
+            let timeout;
+            try {
+              await Promise.race([
+                metronomeAudio.resume(),
+                new Promise((_, reject) => {
+                  timeout = setTimeout(() => reject(new Error(
+                    "Metronome audio was blocked. Interact with the YouTube video and try again."
+                  )), 2000);
+                })
+              ]);
+            } finally {
+              clearTimeout(timeout);
+            }
+          }
+          if (request !== metronomeRequest) {
+            sendResponse({ ok: false, error: "Metronome setting changed." });
+            return;
+          }
+          if (metronomeAudio.state !== "running") throw new Error("Metronome audio is unavailable.");
+          metronomeEnabled = true;
+          sendResponse({ ok: true, metronomeEnabled });
+        } catch (error) {
+          if (request === metronomeRequest) metronomeEnabled = false;
+          sendResponse({ ok: false, error: error.message || "Could not enable the metronome." });
+        }
+      })();
+      return true;
     }
     if (message.type === `${MESSAGE_PREFIX}stop`) {
       stop();
@@ -282,7 +352,7 @@
         return;
       }
       if (!validSequence(message.sequence) || !validBpm(message.bpm)) {
-        sendResponse({ ok: false, error: "Steps must be empty or a digit from 0 to 9, and BPM must be from 1 to 999." });
+        sendResponse({ ok: false, error: "Steps must be empty or a digit from 0 to 9, and BPM must be a whole number from 1 to 999." });
         return;
       }
       if (message.prohibitedPads !== undefined && !validProhibitedPads(message.prohibitedPads)) {
@@ -376,7 +446,7 @@
         randomizeOnStart = message.randomize === true;
       } else if (message.bpm !== undefined) {
         if (!validBpm(message.bpm)) {
-          sendResponse({ ok: false, error: "Enter a BPM from 1 to 999." });
+          sendResponse({ ok: false, error: "Enter a whole-number BPM from 1 to 999." });
           return;
         }
         if (bpm !== message.bpm) {

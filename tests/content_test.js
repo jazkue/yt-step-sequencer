@@ -3,11 +3,13 @@ import { runInNewContext } from "node:vm";
 
 const source = await Deno.readTextFile(new URL("../content.js", import.meta.url));
 
-function setup({ random = Math.random } = {}) {
+function setup({ random = Math.random, audioState = "running", audioResumeError = null, audioResumePending = false } = {}) {
   let now = 0;
   let timerId = 0;
   const timers = new Map();
   const events = [];
+  const notes = [];
+  let audio;
   const handlers = {};
   const location = { href: "https://www.youtube.com/watch?v=first" };
   const video = { paused: false, muted: false, currentTime: 0, duration: 100, play: () => Promise.resolve() };
@@ -25,10 +27,34 @@ function setup({ random = Math.random } = {}) {
     }
   }
 
+  class AudioContext {
+    state = audioState;
+    currentTime = 0;
+    destination = {};
+    constructor() { audio = this; }
+    async resume() {
+      if (audioResumeError) throw new Error(audioResumeError);
+      if (audioResumePending) return new Promise(() => {});
+      this.state = "running";
+    }
+    createOscillator() {
+      return {
+        frequency: { setValueAtTime: value => notes.push(value) },
+        connect() {}, start() {}, stop() {}
+      };
+    }
+    createGain() {
+      return {
+        gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} },
+        connect() {}
+      };
+    }
+  }
+
   const math = Object.create(Math);
   math.random = random;
   runInNewContext(source, {
-    URL, location, KeyboardEvent, Math: math,
+    URL, location, KeyboardEvent, AudioContext, Math: math,
     performance: { now: () => now },
     document: {
       querySelector: () => player,
@@ -48,7 +74,8 @@ function setup({ random = Math.random } = {}) {
   });
 
   return {
-    events, location, video,
+    events, location, video, notes,
+    suspendAudio() { audio.state = "suspended"; },
     connect() {
       const updates = [];
       let disconnect;
@@ -88,6 +115,54 @@ function setup({ random = Math.random } = {}) {
 }
 
 const sequence = ["0", "1", "2", "3", "4", "5", "6", "9"];
+
+Deno.test("metronome follows sequence steps and keeps playing without an observer", async () => {
+  const app = setup();
+  const observer = app.connect();
+  assert.equal((await app.sendAsync("metronome", { enabled: true })).metronomeEnabled, true);
+  assert.deepEqual(app.notes, []);
+  app.send("play", { sequence: ["", "2", ""], bpm: 120 });
+  app.advance(500);
+  observer.disconnect();
+  app.advance(1000);
+  app.advance(1500);
+  assert.deepEqual(app.notes, [1200, 800, 800, 1200]);
+  assert.equal(app.send("status").metronomeEnabled, true);
+  app.send("stop");
+  app.advance(2000);
+  assert.equal(app.notes.length, 4);
+  app.send("play", { sequence: ["0"], bpm: 120 });
+  assert.equal(app.notes.at(-1), 1200);
+  await app.sendAsync("metronome", { enabled: false });
+  app.advance(2500);
+  assert.equal(app.notes.length, 5);
+  assert.equal(app.send("status").metronomeEnabled, false);
+});
+
+Deno.test("metronome reports audio initialization and playback failures", async () => {
+  const blocked = setup({ audioState: "suspended", audioResumeError: "audio blocked" });
+  const result = await blocked.sendAsync("metronome", { enabled: true });
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "audio blocked");
+  assert.equal(blocked.send("status").metronomeEnabled, false);
+
+  const pending = setup({ audioState: "suspended", audioResumePending: true });
+  const enabling = pending.sendAsync("metronome", { enabled: true });
+  pending.advance(2000);
+  const timeout = await enabling;
+  assert.equal(timeout.ok, false);
+  assert.match(timeout.error, /blocked/);
+  assert.equal(pending.send("status").metronomeEnabled, false);
+
+  const app = setup();
+  const observer = app.connect();
+  await app.sendAsync("metronome", { enabled: true });
+  app.suspendAudio();
+  app.send("play", { sequence: ["0"], bpm: 120 });
+  const failure = observer.updates.find(update => update.metronomeError);
+  assert.equal(failure.metronomeEnabled, false);
+  assert.equal(app.send("status").metronomeEnabled, false);
+});
 
 Deno.test("pad follows sequenced digits through empty steps and ignores video time and manual pads", () => {
   const app = setup();

@@ -206,6 +206,22 @@ input:disabled { opacity: 0.5; }
   filter: brightness(0.9);
 }
 
+.metronome {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 36px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  cursor: pointer;
+}
+.tempo .metronome input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.metronome svg { width: 16px; height: 16px; fill: currentColor; }
+.metronome:has(input:checked) { background: var(--accent); }
+.metronome:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
+.metronome:has(input:disabled) { opacity: 0.4; cursor: default; }
+
 button {
   display: grid;
   place-items: center;

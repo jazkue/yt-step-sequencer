@@ -13,6 +13,7 @@ const bpmInput = document.querySelector("#bpm");
 const bpmDecrease = document.querySelector("#bpm-decrease");
 const bpmIncrease = document.querySelector("#bpm-increase");
 const tapTempoButton = document.querySelector("#tap-tempo");
+const metronomeInput = document.querySelector("#metronome");
 const transport = document.querySelector("#transport");
 const status = document.querySelector("#status");
 const timing = document.querySelector("#timing");
@@ -679,7 +680,7 @@ function showGuidance() {
   if (inputs.some(input => !validStep(input.value))) {
     showStatus("steps must be empty or a digit from 0 to 9.", true);
   } else if (!validBpmInput()) {
-    showStatus("enter a bpm from 1 to 999.", true);
+    showStatus("enter a whole-number bpm from 1 to 999.", true);
   } else if (selectedStep !== null) {
     showStatus(`step ${selectedStep + 1}: play a pad, step or enter to advance, esc to exit.`);
   } else {
@@ -694,6 +695,7 @@ function updateState(state, hydrate = false) {
   bpmDecrease.disabled = false;
   bpmIncrease.disabled = false;
   tapTempoButton.disabled = false;
+  metronomeInput.disabled = false;
   for (const button of padButtons.values()) button.disabled = false;
   for (const button of prohibitedButtons.values()) button.disabled = false;
   for (const button of recordButtons.values()) button.disabled = false;
@@ -723,6 +725,9 @@ function updateState(state, hydrate = false) {
   if (Array.isArray(state.prohibitedPads)) {
     prohibitedPads = new Set(state.prohibitedPads);
     updateProhibitedPadControls();
+  }
+  if (typeof state.metronomeEnabled === "boolean") {
+    metronomeInput.checked = state.metronomeEnabled;
   }
   transport.disabled = transportPending;
   transport.classList.toggle("playing", playing);
@@ -769,6 +774,7 @@ function setUnavailable(message) {
   bpmDecrease.disabled = true;
   bpmIncrease.disabled = true;
   tapTempoButton.disabled = true;
+  metronomeInput.disabled = true;
   for (const button of padButtons.values()) {
     button.disabled = true;
     button.classList.remove("current");
@@ -793,7 +799,7 @@ async function send(type, data = {}) {
 
 function validBpmInput() {
   const bpm = Number(bpmInput.value);
-  const isValidFormat = /^[0-9]+(\.[0-9]+)?$/.test(bpmInput.value);
+  const isValidFormat = /^[0-9]+$/.test(bpmInput.value);
   return isValidFormat && bpm >= 1 && bpm <= 999;
 }
 
@@ -959,10 +965,15 @@ function handleTapTempo() {
     totalInterval += tapTempoTimes[i] - tapTempoTimes[i - 1];
   }
   const avgInterval = totalInterval / (tapTempoTimes.length - 1);
-  const bpm = Math.round((60000 / avgInterval) * 100) / 100;
+  const bpm = Math.round(60000 / avgInterval);
   
   if (bpm >= 1 && bpm <= 999) {
+    clearTimeout(bpmTimer);
+    bpmTimer = null;
     bpmInput.value = String(bpm);
+    markBpmValidity();
+    status.classList.remove("error");
+    showGuidance();
     if (playing) {
       updateLive({ bpm });
     } else {
@@ -974,6 +985,21 @@ function handleTapTempo() {
 bpmDecrease.addEventListener("click", () => adjustBpm(-1));
 bpmIncrease.addEventListener("click", () => adjustBpm(1));
 tapTempoButton.addEventListener("click", handleTapTempo);
+metronomeInput.addEventListener("change", () => {
+  const enabled = metronomeInput.checked;
+  metronomeInput.disabled = true;
+  enqueue(async () => {
+    try {
+      const state = await send("metronome", { enabled });
+      metronomeInput.checked = state.metronomeEnabled;
+    } catch (error) {
+      metronomeInput.checked = !enabled;
+      showStatus(error.message || "could not change the metronome.", true);
+    } finally {
+      if (tabId !== null) metronomeInput.disabled = false;
+    }
+  });
+});
 
 form.addEventListener("submit", async event => {
   event.preventDefault();
@@ -1099,6 +1125,11 @@ async function initialize() {
     const port = chrome.tabs.connect(tabId, { name: `${prefix}steps` });
     port.onMessage.addListener(message => {
       if (tabId === null) return;
+      if (message.metronomeError) {
+        metronomeInput.checked = false;
+        showStatus(message.metronomeError, true);
+        return;
+      }
       if (transportPending) return;
       if (message.playbackError) updateState(message);
       else if (playing) updateStepIndicator(message);
