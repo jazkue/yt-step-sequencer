@@ -456,8 +456,12 @@ async function triggerPad(key) {
   if (!button || button.disabled) return;
   if (selectedStep !== null) {
     const input = inputs[selectedStep];
+    const stepHasFocus = inputs.includes(document.activeElement);
     input.value = key;
     input.dispatchEvent(new Event("input", { bubbles: true }));
+    advanceStep();
+    if (stepHasFocus) inputs[selectedStep].focus();
+    else inputs[selectedStep].scrollIntoView({ block: "nearest", inline: "nearest" });
   }
   if (prohibitedPads.has(key)) return;
   button.classList.add("active");
@@ -682,7 +686,7 @@ function showGuidance() {
   } else if (!validBpmInput()) {
     showStatus("enter a whole-number bpm from 1 to 999.", true);
   } else if (selectedStep !== null) {
-    showStatus(`step ${selectedStep + 1}: play a pad, step or enter to advance, esc to exit.`);
+    showStatus(`step ${selectedStep + 1}: play a pad to assign and advance, step or enter to skip, esc to exit.`);
   } else {
     showStatus(playing ? "playing. edit steps or bpm live." : "press play to start.");
   }

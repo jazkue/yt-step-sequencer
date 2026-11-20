@@ -31,6 +31,12 @@ async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [
     addEventListener(type, listener) { this.listeners[type] = listener; }
     setAttribute(name, value) { this.attributes[name] = value; }
     removeAttribute(name) { delete this.attributes[name]; }
+    dispatchEvent(event) { this.listeners[event.type]?.(event); }
+    select() {}
+    focus() { document.activeElement = this; this.listeners.focus?.(); }
+    contains(element) { return this === element || this.children.some(child => child.contains(element)); }
+    scrollIntoView() { this.scrolledIntoView = true; }
+    requestSubmit() { this.submissions = (this.submissions || 0) + 1; }
     append(...children) {
       for (const child of children) {
         child.parentElement = this;
@@ -45,12 +51,16 @@ async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [
 
   const elements = new Map();
   const document = {
+    listeners: {},
+    activeElement: null,
     querySelector(selector) {
       if (!elements.has(selector)) elements.set(selector, new Element());
       return elements.get(selector);
     },
     createElement: () => new Element(),
-    addEventListener() {},
+    addEventListener(type, listener) {
+      (this.listeners[type] ||= []).push(listener);
+    },
     documentElement: { scrollHeight: 460 }
   };
   const steps = document.querySelector("#steps");
@@ -70,6 +80,7 @@ async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [
     window: { innerHeight: 460, get innerWidth() { return popup.width; } },
     location: { search: "" },
     URLSearchParams,
+    Event,
     Date: { now: () => now },
     console: { error: (...args) => errors.push(args) },
     chrome: {
@@ -108,6 +119,18 @@ async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [
     bpm: elements.get("#bpm"),
     status: elements.get("#status"),
     tap: time => { now = time; elements.get("#tap-tempo").listeners.click(); },
+    selectStep: index => runInContext(`selectStep(${index})`, context),
+    focusStep: index => steps.children[index].children[0].focus(),
+    pressKey: key => document.listeners.keydown[0]({
+      key, target: document.activeElement, preventDefault() {}
+    }),
+    clickPad: key => {
+      const button = elements.get("#pads").children["1234567890".indexOf(key)].children[0];
+      button.focus();
+      return button.listeners.click();
+    },
+    form: elements.get("#sequencer"),
+    activeElement: () => document.activeElement,
     updateState: state => { context.testState = state; runInContext("updateState(testState)", context); },
     settle: () => runInContext("commandQueue", context)
   };
@@ -257,4 +280,41 @@ Deno.test("BPM entry rejects decimals and tap tempo restores a valid value", asy
   assert.equal(app.bpm.value, "120");
   assert.equal(app.bpm.attributes["aria-invalid"], "false");
   assert.equal(app.status.classList.contains("error"), false);
+});
+
+Deno.test("assigning pads advances the selected step with mouse and keyboard", async () => {
+  const messages = [];
+  const app = await setup({
+    prohibitedPads: ["4"],
+    sendMessage: async (_tab, message) => { messages.push(message); return { ok: true }; }
+  });
+  app.connect();
+  app.updateState({ playing: false, currentStep: -1 });
+  await app.clickPad("2");
+  assert.equal(app.steps.children[0].children[0].value, "0");
+  assert.equal(app.steps.children[0].classList.contains("selected"), false);
+
+  app.focusStep(0);
+  app.pressKey("9");
+  await app.settle();
+  assert.equal(app.steps.children[0].children[0].value, "9");
+  assert.equal(app.steps.children[1].classList.contains("selected"), true);
+  assert.equal(app.activeElement(), app.steps.children[1].children[0]);
+
+  await app.clickPad("3");
+  assert.equal(app.steps.children[1].children[0].value, "3");
+  assert.equal(app.steps.children[2].classList.contains("selected"), true);
+  assert.equal(app.steps.children[2].children[0].scrolledIntoView, true);
+
+  await app.clickPad("4");
+  assert.equal(app.steps.children[2].children[0].value, "4");
+  assert.equal(app.steps.children[3].classList.contains("selected"), true);
+  assert.deepEqual(messages.map(message => message.key), ["2", "9", "3"]);
+
+  app.selectStep(7);
+  await app.clickPad("5");
+  await app.settle();
+  assert.equal(app.steps.children[7].children[0].value, "5");
+  assert.equal(app.steps.children[0].classList.contains("selected"), true);
+  assert.equal(app.form.submissions, 1);
 });
