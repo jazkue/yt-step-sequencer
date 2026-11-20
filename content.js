@@ -15,6 +15,7 @@
   let stepValue = null;
   let randomizeOnStart = false;
   let prohibitedPads = [];
+  let lockedSteps = [];
   let includeEmptySteps = true;
   let recordedPadTimes = {};
   let padValue = null;
@@ -66,7 +67,7 @@
     const duration = video?.duration;
     return {
       playing: sequence !== null, sequence, bpm, currentStep, stepValue, stepSerial,
-      timingDelays, playbackError, padValue, randomizeOnStart, prohibitedPads,
+      timingDelays, playbackError, padValue, randomizeOnStart, prohibitedPads, lockedSteps,
       includeEmptySteps, recordedPadTimes, metronomeEnabled, recordingSequence, videoId: currentVideoId(),
       videoDuration: Number.isFinite(duration) && duration >= 0 ? duration : null,
       videoPaused: video ? video.paused : null
@@ -105,6 +106,12 @@
       );
   }
 
+  function validLockedSteps(value, length) {
+    return Array.isArray(value) && value.every(index =>
+      Number.isSafeInteger(index) && index >= 0 && (length === null || index < length)
+    ) && new Set(value).size === value.length;
+  }
+
   function setProhibitedPads(value) {
     prohibitedPads = value.slice();
     if (prohibitedPads.includes(padValue)) {
@@ -116,8 +123,10 @@
   function randomSequence() {
     const choices = [..."0123456789"].filter(key => !prohibitedPads.includes(key));
     if (includeEmptySteps) choices.push("");
-    if (choices.length === 0) return null;
-    return sequence.map(() => choices[Math.floor(Math.random() * choices.length)]);
+    if (choices.length === 0 && sequence.some((_, index) => !lockedSteps.includes(index))) return null;
+    return sequence.map((value, index) =>
+      lockedSteps.includes(index) ? value : choices[Math.floor(Math.random() * choices.length)]
+    );
   }
 
   function digitToTimecode(digit, duration) {
@@ -389,6 +398,16 @@
       sendResponse({ ok: true, ...state() });
       return;
     }
+    if (message.type === `${MESSAGE_PREFIX}locks`) {
+      if (!validLockedSteps(message.lockedSteps, sequence?.length ?? null)) {
+        sendResponse({ ok: false, error: "Locked steps must be unique valid step indices." });
+        return;
+      }
+      lockedSteps = message.lockedSteps.slice();
+      notifyObservers({ lockedSteps: lockedSteps.slice() });
+      sendResponse({ ok: true, ...state() });
+      return;
+    }
     if (message.type === `${MESSAGE_PREFIX}record`) {
       if (typeof message.key !== "string" || !/^[0-9]$/.test(message.key)) {
         sendResponse({ ok: false, error: "Enter a digit from 0 to 9." });
@@ -430,9 +449,11 @@
       const recordingPad = recordingSequence && sequence && currentVideoId() === videoId && currentStep >= 0;
       if (recordingPad) {
         const recordedStep = recordingStep(message.pressedAt);
-        sequence[recordedStep] = message.key;
-        saveRecordedSequence();
-        notifyObservers({ ...state(), sequence: sequence.slice(), recordedStep });
+        if (!lockedSteps.includes(recordedStep)) {
+          sequence[recordedStep] = message.key;
+          saveRecordedSequence();
+          notifyObservers({ ...state(), sequence: sequence.slice(), recordedStep });
+        }
       }
       const timecode = message.timecode;
       if (timecode !== undefined) video.currentTime = timecode;
@@ -454,6 +475,30 @@
       }
       manuallyPaused = false;
       if (recordingPad) waitingForRecordingPad = false;
+      sendResponse({ ok: true });
+      return;
+    }
+    if (message.type === `${MESSAGE_PREFIX}seek`) {
+      if (message.direction !== "backward" && message.direction !== "forward") {
+        sendResponse({ ok: false, error: "Choose a valid seek direction." });
+        return;
+      }
+      const video = document.querySelector(".html5-video-player")?.querySelector("video");
+      if (!currentVideoId() || !video || !Number.isFinite(video.currentTime)) {
+        sendResponse({ ok: false, error: "The video time is not available yet." });
+        return;
+      }
+      const ranges = video.seekable;
+      const start = ranges?.length ? ranges.start(0) : 0;
+      const end = Number.isFinite(video.duration)
+        ? video.duration
+        : ranges?.length ? ranges.end(ranges.length - 1) : null;
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) {
+        sendResponse({ ok: false, error: "The video seek range is not available yet." });
+        return;
+      }
+      const offset = message.direction === "forward" ? 5 : -5;
+      video.currentTime = Math.max(start, Math.min(end, video.currentTime + offset));
       sendResponse({ ok: true });
       return;
     }
@@ -487,6 +532,14 @@
         sendResponse({ ok: false, error: "Steps must be empty or a digit from 0 to 9, and BPM must be a whole number from 1 to 999." });
         return;
       }
+      if (message.lockedSteps !== undefined && !validLockedSteps(message.lockedSteps, message.sequence.length)) {
+        sendResponse({ ok: false, error: "Locked steps must be unique valid step indices." });
+        return;
+      }
+      if (message.lockedSteps === undefined && !validLockedSteps(lockedSteps, message.sequence.length)) {
+        sendResponse({ ok: false, error: "Unlock steps before removing them." });
+        return;
+      }
       if (message.recordingSequence !== undefined && typeof message.recordingSequence !== "boolean") {
         sendResponse({ ok: false, error: "Recording setting must be on or off." });
         return;
@@ -510,6 +563,7 @@
       if (message.prohibitedPads !== undefined) setProhibitedPads(message.prohibitedPads);
       if (message.recordedPadTimes !== undefined) recordedPadTimes = { ...message.recordedPadTimes };
       if (message.includeEmptySteps !== undefined) includeEmptySteps = message.includeEmptySteps;
+      if (message.lockedSteps !== undefined) lockedSteps = message.lockedSteps.slice();
       const startRecording = message.recordingSequence === true;
       stop();
       if (startRecording) metronomeEnabled = true;
@@ -562,6 +616,10 @@
           sendResponse({ ok: false, error: "Steps must be empty or a digit from 0 to 9." });
           return;
         }
+        if (lockedSteps.some(index => index >= message.sequence.length || message.sequence[index] !== sequence[index])) {
+          sendResponse({ ok: false, error: "Unlock steps before changing or removing them." });
+          return;
+        }
         const previousLength = sequence.length;
         sequence = message.sequence.slice();
         if (sequence.length !== previousLength) {
@@ -575,6 +633,10 @@
         if (!Number.isInteger(message.step) || message.step < 0 || message.step >= sequence.length ||
             !validStep(message.value)) {
           sendResponse({ ok: false, error: "Steps must be empty or a digit from 0 to 9." });
+          return;
+        }
+        if (lockedSteps.includes(message.step) && message.value !== sequence[message.step]) {
+          sendResponse({ ok: false, error: "Unlock the step before changing it." });
           return;
         }
         sequence[message.step] = message.value;

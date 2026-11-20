@@ -129,6 +129,92 @@ function setup({ random = Math.random, audioState = "running", audioResumeError 
 
 const sequence = ["0", "1", "2", "3", "4", "5", "6", "9"];
 
+Deno.test("video seek moves five seconds, clamps to video bounds, and preserves playback state", () => {
+  const app = setup();
+  app.video.paused = true;
+  app.video.currentTime = 20;
+  assert.equal(app.send("seek", { direction: "backward" }).ok, true);
+  assert.equal(app.video.currentTime, 15);
+  assert.equal(app.video.paused, true);
+  assert.equal(app.send("seek", { direction: "forward" }).ok, true);
+  assert.equal(app.video.currentTime, 20);
+  app.video.currentTime = 2;
+  app.send("seek", { direction: "backward" });
+  assert.equal(app.video.currentTime, 0);
+  app.video.currentTime = 98;
+  app.send("seek", { direction: "forward" });
+  assert.equal(app.video.currentTime, 100);
+  assert.equal(app.send("seek", { direction: "invalid" }).ok, false);
+
+  const playing = setup();
+  playing.send("play", { sequence: ["", ""], bpm: 120 });
+  playing.video.currentTime = 20;
+  playing.send("seek", { direction: "forward" });
+  assert.equal(playing.video.currentTime, 25);
+  assert.equal(playing.send("status").playing, true);
+  playing.advance(500);
+  assert.equal(playing.video.currentTime, 25);
+});
+
+Deno.test("video seek supports live seek ranges and reports unavailable players", () => {
+  const app = setup();
+  app.video.duration = Infinity;
+  app.video.currentTime = 103;
+  app.video.seekable = { length: 1, start: () => 100, end: () => 110 };
+  assert.equal(app.send("seek", { direction: "backward" }).ok, true);
+  assert.equal(app.video.currentTime, 100);
+  app.video.currentTime = 108;
+  app.send("seek", { direction: "forward" });
+  assert.equal(app.video.currentTime, 110);
+  app.video.seekable = { length: 0 };
+  assert.equal(app.send("seek", { direction: "forward" }).ok, false);
+  app.removeVideo();
+  assert.equal(app.send("seek", { direction: "forward" }).ok, false);
+});
+
+Deno.test("locked steps survive automatic randomization and reject live changes or removal", () => {
+  const app = setup({ random: () => 0 });
+  const started = app.send("play", {
+    sequence: ["6", "1", "8"], bpm: 120, randomize: true, lockedSteps: [0, 2]
+  });
+  assert.deepEqual([...started.sequence], ["6", "0", "8"]);
+  assert.equal(app.send("update", { step: 0, value: "7" }).ok, false);
+  assert.equal(app.send("update", { sequence: ["", "", ""] }).ok, false);
+  assert.equal(app.send("update", { sequence: ["6", "0"] }).ok, false);
+  app.advance(500);
+  app.advance(1000);
+  app.advance(1500);
+  assert.deepEqual([...app.send("status").sequence], ["6", "0", "8"]);
+  assert.equal(app.send("locks", { lockedSteps: [0] }).ok, true);
+  assert.equal(app.send("update", { step: 2, value: "7" }).ok, true);
+  assert.equal(app.send("locks", { lockedSteps: [0, 0] }).ok, false);
+});
+
+Deno.test("all-locked sequences stay unchanged when no random choices are available", () => {
+  const app = setup();
+  const started = app.send("play", {
+    sequence: ["", "8"], bpm: 120, randomize: true, lockedSteps: [0, 1],
+    prohibitedPads: [..."0123456789"], includeEmptySteps: false
+  });
+  assert.deepEqual([...started.sequence], ["", "8"]);
+  app.advance(500);
+  app.advance(1000);
+  assert.deepEqual([...app.send("status").sequence], ["", "8"]);
+});
+
+Deno.test("recording plays pads but does not overwrite locked steps", async () => {
+  const app = setup();
+  await app.sendAsync("metronome", { enabled: true });
+  app.send("play", { sequence: ["6", ""], bpm: 120, recordingSequence: true, lockedSteps: [0] });
+  await app.sendAsync("trigger", { key: "9" });
+  assert.equal(app.video.currentTime, 90);
+  assert.deepEqual([...app.send("status").sequence], ["6", ""]);
+  app.advance(500);
+  await app.sendAsync("trigger", { key: "3" });
+  await app.sendAsync("finish-recording");
+  assert.deepEqual(app.savedSequences.at(-1), ["6", "3"]);
+});
+
 Deno.test("video control pauses independently of the sequencer and a pad resumes it", async () => {
   const app = setup();
   const observer = app.connect();

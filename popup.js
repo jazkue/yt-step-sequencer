@@ -40,6 +40,7 @@ let videoAvailable = false;
 let selectedStep = null;
 let lastStepSerial = -1;
 let prohibitedPads = new Set();
+let lockedSteps = new Set();
 let includeEmptySteps = true;
 let videoId = null;
 let videoDuration = null;
@@ -66,10 +67,11 @@ document.addEventListener("pointerdown", event => {
 });
 
 const inputs = [];
+const lockButtons = [];
 
 function appendStep(value) {
   const index = inputs.length;
-  const label = document.createElement("label");
+  const label = document.createElement("div");
   label.className = "step";
   const input = document.createElement("input");
   input.type = "text";
@@ -88,6 +90,10 @@ function appendStep(value) {
     input.select();
   });
   input.addEventListener("input", () => {
+    if (lockedSteps.has(index)) {
+      input.value = input.dataset.lockedValue;
+      return;
+    }
     if (validStep(input.value)) {
       if (playing) updateLive({ step: index, value: input.value });
       else {
@@ -109,19 +115,77 @@ function appendStep(value) {
     }
     input.select();
   });
-  label.append(input);
+  const lock = document.createElement("button");
+  lock.type = "button";
+  lock.className = "step-lock";
+  lock.addEventListener("click", () => toggleStepLock(index));
+  label.append(input, lock);
   steps.append(label);
   inputs.push(input);
+  lockButtons.push(lock);
+  updateStepLock(index);
 }
 
 function setSequence(sequence) {
   while (inputs.length < sequence.length) appendStep("");
   while (inputs.length > sequence.length) {
     inputs.pop().parentElement.remove();
+    lockButtons.pop();
   }
   inputs.forEach((input, index) => { input.value = sequence[index]; });
+  inputs.forEach((_, index) => updateStepLock(index));
   removeStepButton.disabled = inputs.length === 1;
   if (selectedStep !== null && selectedStep >= inputs.length) selectStep(null);
+}
+
+function updateStepLock(index) {
+  const locked = lockedSteps.has(index);
+  const input = inputs[index];
+  const button = lockButtons[index];
+  input.readOnly = locked;
+  input.dataset.lockedValue = input.value;
+  button.classList.toggle("locked", locked);
+  button.setAttribute("aria-pressed", String(locked));
+  const label = `${locked ? "unlock" : "lock"} step ${index + 1}`;
+  button.setAttribute("aria-label", label);
+  button.title = label;
+  button.innerHTML = locked
+    ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7a5 5 0 0 1 10 0v3h1a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2zm2 0h6V7a3 3 0 0 0-6 0z"></path></svg>'
+    : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7a5 5 0 0 1 9.5-2.2l-1.8.9A3 3 0 0 0 9 7v3h9a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2z"></path></svg>';
+}
+
+function setLockedSteps(indices) {
+  lockedSteps = new Set(indices);
+  inputs.forEach((_, index) => updateStepLock(index));
+  removeStepButton.disabled = inputs.length === 1;
+}
+
+function toggleStepLock(index) {
+  if (!lockedSteps.has(index) && !validStep(inputs[index].value)) {
+    showGuidance();
+    return;
+  }
+  const previous = new Set(lockedSteps);
+  const indices = new Set(previous);
+  if (indices.has(index)) indices.delete(index);
+  else indices.add(index);
+  setLockedSteps(indices);
+  if (!status.classList.contains("error")) showGuidance();
+  const value = [...indices];
+  enqueue(async () => {
+    let synchronized = false;
+    try {
+      if (tabId !== null) await send("locks", { lockedSteps: value });
+      synchronized = true;
+      await chrome.storage.local.set({ lockedSteps: value });
+    } catch (error) {
+      if (!synchronized && lockedSteps.size === indices.size &&
+          [...indices].every(step => lockedSteps.has(step))) {
+        setLockedSteps(previous);
+      }
+      showStatus(error.message || "could not synchronize step locks.", true);
+    }
+  });
 }
 
 function defaultSequence() {
@@ -468,7 +532,7 @@ function toggleProhibitedPad(key) {
 async function triggerPad(key, timeStamp) {
   const button = padButtons.get(key);
   if (!button || button.disabled) return;
-  if (selectedStep !== null && !recordingSequence) {
+  if (selectedStep !== null && !recordingSequence && !lockedSteps.has(selectedStep)) {
     const input = inputs[selectedStep];
     input.value = key;
     input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -497,7 +561,16 @@ async function triggerPad(key, timeStamp) {
 }
 
 document.addEventListener("keydown", event => {
-  if (event.repeat || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+  if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+  if ((event.key === "ArrowLeft" || event.key === "ArrowRight") &&
+      tabId !== null && event.target !== bpmInput && !inputs.includes(event.target) &&
+      !optionsMenu.contains(event.target) && event.target !== optionsToggle) {
+    event.preventDefault();
+    send("seek", { direction: event.key === "ArrowLeft" ? "backward" : "forward" })
+      .catch(error => showStatus(error.message || "could not seek the video.", true));
+    return;
+  }
+  if (event.repeat) return;
   if (event.key === "Escape" && !optionsMenu.hidden) {
     event.preventDefault();
     setOptionsOpen(false);
@@ -516,6 +589,7 @@ document.addEventListener("keydown", event => {
       event.target !== videoPlayback &&
       event.target !== transport &&
       event.target !== bpmDecrease && event.target !== bpmIncrease) {
+    if (lockButtons.includes(event.target)) return;
     event.preventDefault();
     advanceStep();
   } else if (event.key === "Escape" && selectedStep !== null) {
@@ -537,7 +611,8 @@ document.addEventListener("pointerdown", event => {
 
 function dropTarget(event) {
   const label = event.target.closest?.(".step");
-  return label && event.dataTransfer.types.includes("application/x-yt-pad") ? label : null;
+  return label && !lockedSteps.has([...steps.children].indexOf(label)) &&
+    event.dataTransfer.types.includes("application/x-yt-pad") ? label : null;
 }
 
 steps.addEventListener("dragover", event => {
@@ -595,8 +670,10 @@ function validStep(value) {
 function randomSequence() {
   const choices = [..."0123456789"].filter(key => !prohibitedPads.has(key));
   if (includeEmptySteps) choices.push("");
-  if (choices.length === 0) return null;
-  return inputs.map(() => choices[Math.floor(Math.random() * choices.length)]);
+  if (choices.length === 0 && inputs.some((_, index) => !lockedSteps.has(index))) return null;
+  return inputs.map((input, index) =>
+    lockedSteps.has(index) ? input.value : choices[Math.floor(Math.random() * choices.length)]
+  );
 }
 
 function replaceSequence(sequence) {
@@ -648,6 +725,10 @@ addStepButton.addEventListener("click", () => {
 });
 removeStepButton.addEventListener("click", () => {
   if (inputs.length === 1) return;
+  if (lockedSteps.has(inputs.length - 1)) {
+    showStatus("unlock the last step before removing it.", true);
+    return;
+  }
   const sequence = inputs.slice(0, -1).map(input => input.value);
   if (!sequence.every(validStep)) {
     showGuidance();
@@ -666,7 +747,9 @@ randomizeButton.addEventListener("click", () => {
   }
   replaceSequence(sequence);
 });
-clearButton.addEventListener("click", () => replaceSequence(inputs.map(() => "")));
+clearButton.addEventListener("click", () =>
+  replaceSequence(inputs.map((input, index) => lockedSteps.has(index) ? input.value : ""))
+);
 resetButton.addEventListener("click", () => {
   recordedPadTimes = {};
   if (videoId) delete recordedPadTimesByVideo[videoId];
@@ -694,7 +777,11 @@ resetButton.addEventListener("click", () => {
       showStatus(error.message || "could not reset pads.", true);
     }
   });
-  replaceSequence(defaultSequence());
+  const defaults = defaultSequence();
+  const length = Math.max(defaults.length, ...[...lockedSteps].map(index => index + 1));
+  replaceSequence(Array.from({ length }, (_, index) =>
+    lockedSteps.has(index) ? inputs[index].value : (defaults[index] ?? "")
+  ));
   resizeWindow(false, false, true);
 });
 
@@ -710,6 +797,8 @@ function showGuidance() {
     showStatus("enter a whole-number bpm from 1 to 999.", true);
   } else if (recordingSequence) {
     showStatus("recording. play pads to record the current step.");
+  } else if (selectedStep !== null && lockedSteps.has(selectedStep)) {
+    showStatus("step locked. unlock to edit.");
   } else if (selectedStep !== null) {
     showStatus("press pad to save step.");
   } else {
@@ -720,6 +809,7 @@ function showGuidance() {
 function updateState(state, hydrate = false) {
   playing = state.playing;
   if ("videoPaused" in state) updateVideoPlayback(state.videoPaused);
+  if (Array.isArray(state.lockedSteps)) setLockedSteps(state.lockedSteps);
   if (typeof state.recordingSequence === "boolean") recordingSequence = state.recordingSequence;
   settings.disabled = false;
   bpmInput.disabled = false;
@@ -1096,7 +1186,7 @@ sequenceRecordButton.addEventListener("click", () => {
   }
   const starting = !recordingSequence;
   const bpm = Number(bpmInput.value);
-  const sequence = inputs.map(() => "");
+  const sequence = inputs.map((input, index) => lockedSteps.has(index) ? input.value : "");
   transportPending = true;
   transport.disabled = true;
   sequenceRecordButton.disabled = true;
@@ -1125,7 +1215,7 @@ sequenceRecordButton.addEventListener("click", () => {
       const state = await send("play", {
         sequence, bpm, randomize: false, recordingSequence: true,
         prohibitedPads: [...prohibitedPads], includeEmptySteps,
-        recordedPadTimes: { ...recordedPadTimes }
+        recordedPadTimes: { ...recordedPadTimes }, lockedSteps: [...lockedSteps]
       });
       status.classList.remove("error");
       updateState(state);
@@ -1201,7 +1291,7 @@ form.addEventListener("submit", async event => {
       await chrome.storage.local.set({ sequence, bpm });
       const state = await send("play", {
         sequence, bpm, randomize: connectBox.checked, prohibitedPads: [...prohibitedPads],
-        includeEmptySteps, recordedPadTimes: { ...recordedPadTimes }
+        includeEmptySteps, recordedPadTimes: { ...recordedPadTimes }, lockedSteps: [...lockedSteps]
       });
       status.classList.remove("error");
       updateState(state);
@@ -1234,7 +1324,7 @@ async function initialize() {
   try {
     const saved = await chrome.storage.local.get([
       "sequence", "bpm", "randomize", "prohibitedPads", "includeEmptySteps",
-      "recordedPadTimesByVideo"
+      "recordedPadTimesByVideo", "lockedSteps"
     ]);
     setConnected(saved.randomize === true);
     includeEmptySteps = saved.includeEmptySteps !== false;
@@ -1247,6 +1337,11 @@ async function initialize() {
     if (Array.isArray(saved.sequence) && saved.sequence.length > 0 &&
         saved.sequence.every(validStep)) {
       setSequence(saved.sequence);
+    }
+    if (Array.isArray(saved.lockedSteps)) {
+      setLockedSteps(saved.lockedSteps.filter(index =>
+        Number.isSafeInteger(index) && index >= 0
+      ));
     }
     if (Number.isInteger(saved.bpm) && saved.bpm >= 1 && saved.bpm <= 999) {
       bpmInput.value = String(saved.bpm);
@@ -1277,10 +1372,21 @@ async function initialize() {
     videoTitle.textContent = (tab.title || "").replace(/^\(\d+\)\s*/, "").replace(/ - youtube$/i, "").toLowerCase();
     videoTitle.title = videoTitle.textContent;
     await send("prohibited", { prohibitedPads: [...prohibitedPads] });
+    const initialState = await send("status");
+    if (initialState.playing && Array.isArray(initialState.sequence) &&
+        initialState.sequence.length > 0 && initialState.sequence.every(validStep) &&
+        Array.isArray(initialState.lockedSteps)) {
+      setSequence(initialState.sequence);
+      setLockedSteps(initialState.lockedSteps);
+    } else {
+      setLockedSteps([...lockedSteps].filter(index => index < inputs.length));
+      await send("locks", { lockedSteps: [...lockedSteps] });
+    }
     const port = chrome.tabs.connect(tabId, { name: `${prefix}steps` });
     port.onMessage.addListener(message => {
       if (tabId === null) return;
       if ("videoPaused" in message) updateVideoPlayback(message.videoPaused);
+      if (Array.isArray(message.lockedSteps)) setLockedSteps(message.lockedSteps);
       if (message.metronomeError) {
         if (typeof message.playing === "boolean") updateState(message);
         else metronomeInput.checked = false;

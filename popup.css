@@ -12,6 +12,7 @@
   --error: #9c2523;
   --step-size: calc((332px - 45px - 56px - 8px) / 8);
   --step-controls-height: 28px;
+  --step-lock-space: 16px;
   background: var(--background);
   color: var(--ink);
 }
@@ -93,14 +94,29 @@ fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
   grid-auto-columns: var(--step-size);
   gap: 5px;
   min-width: 0;
-  padding: 4px;
+  padding: calc(4px + var(--step-lock-space)) 4px 4px;
   overflow-x: auto;
   scrollbar-width: none;
 }
 .step-row button { flex-shrink: 0; width: 28px; height: 28px; border: 0; background: transparent; }
 .step-row button:active:not(:disabled) { background: transparent; }
-.step { min-width: 0; }
+.step-row > button { align-self: flex-end; margin-bottom: 4px; }
+.step { position: relative; min-width: 0; }
 .step.selected, .step.drop-target { position: relative; z-index: 1; }
+.step-row .step-lock {
+  position: absolute;
+  z-index: 2;
+  top: calc(-1 * var(--step-lock-space));
+  left: 0;
+  width: 100%;
+  height: var(--step-lock-space);
+  padding: 0 0 2px;
+  color: var(--muted);
+  opacity: 0;
+}
+.step:hover .step-lock, .step-row .step-lock.locked, .step-row .step-lock:focus-visible { opacity: 1; }
+.step-row .step-lock.locked { color: var(--ink); }
+.step-lock svg { width: 10px; height: 10px; }
 
 input {
   width: 100%;
@@ -115,6 +131,7 @@ input {
 
 .step input { display: block; height: auto; aspect-ratio: 1; font-size: 15px; scroll-margin: 4px; }
 .step.active input { background: var(--accent); color: var(--ink); }
+.step input[readonly] { opacity: 0.5; }
 .step.selected input { outline: 2px solid var(--focus); outline-offset: 2px; }
 .step.drop-target input { outline: 2px dashed var(--focus); outline-offset: 2px; }
 #settings { position: relative; }
@@ -122,7 +139,7 @@ input {
   position: absolute;
   z-index: 2;
   left: -20px;
-  top: calc(4px + var(--step-size) / 2);
+  top: calc(4px + var(--step-lock-space) + var(--step-size) / 2);
   bottom: calc(var(--step-controls-height) / 2);
   width: 16px;
 }

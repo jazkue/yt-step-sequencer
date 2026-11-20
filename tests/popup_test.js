@@ -3,7 +3,7 @@ import { createContext, runInContext } from "node:vm";
 
 const source = await Deno.readTextFile(new URL("../popup.js", import.meta.url));
 
-async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [], sendMessage, connected = false } = {}) {
+async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [], saved = {}, sendMessage, connected = false } = {}) {
   const popup = { id: 1, left, top: 100, width, height: 460 };
   const updates = [];
   const errors = [];
@@ -28,6 +28,7 @@ async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [
     };
     scrollLeft = 0;
     value = "";
+    disabled = false;
 
     addEventListener(type, listener) { this.listeners[type] = listener; }
     setAttribute(name, value) { this.attributes[name] = value; }
@@ -101,7 +102,7 @@ async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [
       },
       storage: {
         local: {
-          get: async () => ({ prohibitedPads }),
+          get: async () => ({ prohibitedPads, ...saved }),
           set: async value => storageSets.push(JSON.parse(JSON.stringify(value)))
         }
       },
@@ -124,8 +125,14 @@ async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [
     add: () => elements.get("#add-step").listeners.click(),
     remove: () => elements.get("#remove-step").listeners.click(),
     reset: () => elements.get("#reset").listeners.click(),
+    clear: () => elements.get("#clear").listeners.click(),
+    randomize: () => elements.get("#randomize").listeners.click(),
+    lock: index => steps.children[index].children[1].listeners.click(),
+    removeButton,
+    addButton: elements.get("#add-step"),
     record: () => elements.get("#sequence-record").listeners.click(),
     recordButton: elements.get("#sequence-record"),
+    settings: elements.get("#settings"),
     transport: elements.get("#transport"),
     videoPlayback: elements.get("#video-playback"),
     toggleVideo: () => elements.get("#video-playback").listeners.click(),
@@ -141,9 +148,14 @@ async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [
     tap: time => { now = time; elements.get("#tap-tempo").listeners.click(); },
     selectStep: index => runInContext(`selectStep(${index})`, context),
     focusStep: index => steps.children[index].children[0].focus(),
-    pressKey: (key, timeStamp) => document.listeners.keydown[0]({
-      key, timeStamp, target: document.activeElement, preventDefault() {}
-    }),
+    pressKey: (key, timeStamp, options = {}) => {
+      let prevented = false;
+      document.listeners.keydown[0]({
+        key, timeStamp, target: document.activeElement, ...options,
+        preventDefault() { prevented = true; }
+      });
+      return prevented;
+    },
     clickPad: (key, event = { detail: 1 }) => {
       const button = elements.get("#pads").children["1234567890".indexOf(key)].children[0];
       button.focus();
@@ -241,6 +253,121 @@ Deno.test("reset allows all pads and clears their forbidden state", async () => 
   ));
 });
 
+Deno.test("locked steps persist and resist pad entry, randomize, clear, reset, and removal", async () => {
+  const app = await setup({
+    saved: { sequence: ["4", "1", "2", "3", "4", "5", "6", "7", "9"], lockedSteps: [0, 8] },
+    sendMessage: async () => ({ ok: true })
+  });
+  app.connect();
+  app.updateState({ playing: false });
+  assert.equal(app.steps.children[0].children[0].readOnly, true);
+  assert.equal(app.steps.children[0].children[1].attributes["aria-pressed"], "true");
+  app.selectStep(0);
+  await app.clickPad("5");
+  assert.equal(app.steps.children[0].children[0].value, "4");
+  app.steps.children[0].children[0].value = "6";
+  app.steps.children[0].children[0].listeners.input();
+  assert.equal(app.steps.children[0].children[0].value, "4");
+  app.steps.listeners.drop({
+    target: { closest: () => app.steps.children[0] },
+    dataTransfer: { types: ["application/x-yt-pad"], getData: () => "8" },
+    preventDefault() { throw new Error("locked steps must reject drops"); }
+  });
+  assert.equal(app.steps.children[0].children[0].value, "4");
+  app.randomize();
+  await app.settle();
+  assert.equal(app.steps.children[0].children[0].value, "4");
+  assert.equal(app.steps.children[8].children[0].value, "9");
+  app.clear();
+  await app.settle();
+  assert.equal(app.steps.children[0].children[0].value, "4");
+  assert.equal(app.steps.children[1].children[0].value, "");
+  assert.equal(app.steps.children[8].children[0].value, "9");
+  assert.equal(app.removeButton.disabled, false);
+  assert.equal(app.addButton.disabled, false);
+  app.remove();
+  assert.equal(app.steps.children.length, 9);
+  assert.equal(app.status.textContent, "unlock the last step before removing it.");
+  app.add();
+  await app.settle();
+  assert.equal(app.steps.children.length, 10);
+  app.remove();
+  await app.settle();
+  assert.equal(app.steps.children.length, 9);
+  app.reset();
+  await app.settle();
+  assert.equal(app.steps.children.length, 9);
+  assert.equal(app.steps.children[0].children[0].value, "4");
+  assert.equal(app.steps.children[1].children[0].value, "1");
+  assert.equal(app.steps.children[8].children[0].value, "9");
+  app.lock(8);
+  await app.settle();
+  assert.equal(app.removeButton.disabled, false);
+  assert.ok(app.storageSets.some(value => JSON.stringify(value.lockedSteps) === "[0]"));
+  app.remove();
+  await app.settle();
+  assert.equal(app.steps.children.length, 8);
+});
+
+Deno.test("reopening during playback uses the live sequence and locks instead of stale storage", async () => {
+  const messages = [];
+  const app = await setup({
+    connected: true,
+    saved: { sequence: ["0"], lockedSteps: [0] },
+    sendMessage: async (_tab, message) => {
+      messages.push(message);
+      if (message.type.endsWith(":status")) {
+        return {
+          ok: true, playing: true, sequence: ["0", "7"], lockedSteps: [1],
+          bpm: 120, currentStep: 0, stepSerial: 1
+        };
+      }
+      return { ok: true };
+    }
+  });
+  assert.equal(app.steps.children.length, 2);
+  assert.equal(app.steps.children[0].children[0].readOnly, false);
+  assert.equal(app.steps.children[1].children[0].readOnly, true);
+  assert.equal(messages.some(message => message.type.endsWith(":locks")), false);
+});
+
+Deno.test("lock synchronization failure restores the lock and keeps controls usable", async () => {
+  const app = await setup({
+    sendMessage: async () => ({ ok: false, error: "lock sync failed" })
+  });
+  app.connect();
+  app.updateState({ playing: false });
+  app.lock(7);
+  await app.settle();
+  assert.equal(app.status.textContent, "lock sync failed");
+  assert.equal(app.steps.children[7].children[0].readOnly, false);
+  assert.equal(app.settings.disabled, false);
+  assert.equal(app.addButton.disabled, false);
+  assert.equal(app.removeButton.disabled, false);
+  app.add();
+  await app.settle();
+  assert.equal(app.steps.children.length, 9);
+});
+
+Deno.test("recording clears only unlocked steps and sends locks to the sequencer", async () => {
+  const messages = [];
+  const app = await setup({
+    saved: { sequence: ["4", "1", "2"], lockedSteps: [0] },
+    sendMessage: async (_tab, message) => {
+      messages.push(message);
+      if (message.type.endsWith(":metronome")) return { ok: true, metronomeEnabled: true };
+      return { ok: true, playing: true, recordingSequence: true, metronomeEnabled: true };
+    }
+  });
+  app.connect();
+  app.updateState({ playing: false });
+  app.record();
+  await app.settle();
+  const play = messages.find(message => message.type.endsWith(":play"));
+  assert.deepEqual([...play.sequence], ["4", "", ""]);
+  assert.deepEqual([...play.lockedSteps], [0]);
+});
+
 Deno.test("metronome checkbox follows tab state and reports failed changes", async () => {
   const messages = [];
   const app = await setup({
@@ -303,6 +430,35 @@ Deno.test("BPM entry rejects decimals and tap tempo restores a valid value", asy
   assert.equal(app.bpm.value, "120");
   assert.equal(app.bpm.attributes["aria-invalid"], "false");
   assert.equal(app.status.classList.contains("error"), false);
+});
+
+Deno.test("arrow keys seek the video, including repeats, except while editing text", async () => {
+  const messages = [];
+  const app = await setup({
+    sendMessage: async (_tab, message) => { messages.push(message); return { ok: true }; }
+  });
+  app.connect();
+  app.updateState({ playing: false });
+  assert.equal(app.pressKey("ArrowLeft"), true);
+  assert.equal(app.pressKey("ArrowRight", 0, { repeat: true }), true);
+  assert.equal(app.pressKey("ArrowLeft", 0, { ctrlKey: true }), false);
+  app.focusStep(0);
+  assert.equal(app.pressKey("ArrowLeft"), false);
+  app.bpm.focus();
+  assert.equal(app.pressKey("ArrowRight"), false);
+  assert.deepEqual(messages.map(message => [message.type, message.direction]), [
+    ["yt-step-sequencer:seek", "backward"],
+    ["yt-step-sequencer:seek", "forward"]
+  ]);
+});
+
+Deno.test("arrow-key seek failures are reported", async () => {
+  const app = await setup({ sendMessage: async () => ({ ok: false, error: "seek unavailable" }) });
+  app.connect();
+  app.updateState({ playing: false });
+  assert.equal(app.pressKey("ArrowLeft"), true);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(app.status.textContent, "seek unavailable");
 });
 
 Deno.test("assigning pads advances the selected step with mouse and keyboard", async () => {
