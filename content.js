@@ -61,7 +61,9 @@
       timingDelays, playbackError, padValue, randomizeOnStart, prohibitedPads, lockedSteps,
       includeEmptySteps, recordedPadTimes, metronomeEnabled, videoId: currentVideoId(),
       videoDuration: Number.isFinite(duration) && duration >= 0 ? duration : null,
-      videoPaused: video ? video.paused : null
+      videoPaused: video ? video.paused : null,
+      videoVolume: video ? video.volume : null,
+      videoMuted: video ? video.muted : null
     };
   }
 
@@ -230,7 +232,10 @@
       nextTime += interval;
       if (nextTime - now < interval / 4) nextTime = now + interval;
     }
-    timer = setTimeout(tick, Math.max(0, nextTime - now));
+    const wakeTime = pendingClock
+      ? Math.min(nextTime, pendingClock.clock.startAt - performance.timeOrigin)
+      : nextTime;
+    timer = setTimeout(tick, Math.max(0, wakeTime - now));
     if (!video.paused) manuallyPaused = false;
     if (!manuallyPaused) resumeVideo(video);
   }
@@ -245,7 +250,10 @@
       notifyObservers({ videoPaused: target.paused });
     }, true);
   }
-
+  document.addEventListener("volumechange", ({ target }) => {
+    if (target !== document.querySelector(".html5-video-player")?.querySelector("video")) return;
+    notifyObservers({ videoVolume: target.volume, videoMuted: target.muted });
+  }, true);
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!message || typeof message.type !== "string" ||
         !message.type.startsWith(MESSAGE_PREFIX)) return;
@@ -257,6 +265,21 @@
         return;
       }
       sendResponse({ ok: true, ...state() });
+      return;
+    }
+    if (message.type === `${MESSAGE_PREFIX}video-volume`) {
+      if (!Number.isFinite(message.volume) || message.volume < 0 || message.volume > 100) {
+        sendResponse({ ok: false, error: "Volume must be between 0 and 100." });
+        return;
+      }
+      const video = document.querySelector(".html5-video-player")?.querySelector("video");
+      if (!currentVideoId() || !video) {
+        sendResponse({ ok: false, error: "Open a YouTube video and wait for the player to load." });
+        return;
+      }
+      video.volume = message.volume / 100;
+      if (message.volume > 0) video.muted = false;
+      sendResponse({ ok: true, videoVolume: video.volume, videoMuted: video.muted });
       return;
     }
     if (message.type === `${MESSAGE_PREFIX}video-toggle`) {
@@ -447,10 +470,8 @@
       }
       pendingClock = { bpm: message.bpm, clock: message.clock };
       const target = message.clock.startAt - performance.timeOrigin;
-      if (nextTime > target) {
-        clearTimeout(timer);
-        timer = setTimeout(tick, Math.max(0, target - performance.now()));
-      }
+      clearTimeout(timer);
+      timer = setTimeout(tick, Math.max(0, Math.min(nextTime, target) - performance.now()));
       sendResponse({ ok: true, ...state() });
       return;
     }

@@ -62,13 +62,13 @@ function chorusNow() {
   return performance.timeOrigin + performance.now();
 }
 
-function nextClock(session) {
+function nextClock(session, bpm = session.bpm) {
   const now = chorusNow() + 350;
   if (!session.playing || !session.clock) return { startAt: now, step: 0 };
   const interval = 60000 / session.bpm;
   const beat = Math.max(0, Math.ceil((now - session.clock.startAt) / interval));
   return {
-    startAt: session.clock.startAt + beat * interval,
+    startAt: Math.min(session.clock.startAt + beat * interval, now + 60000 / bpm),
     step: (session.clock.step + beat) % session.length
   };
 }
@@ -230,7 +230,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         }
         if (session.bpm !== message.bpm) {
           if (session.playing) {
-            session.clock = nextClock(session);
+            session.clock = nextClock(session, message.bpm);
             session.clockVersion++;
           }
           session.bpm = message.bpm;

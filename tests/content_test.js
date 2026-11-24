@@ -15,7 +15,7 @@ function setup({
   const handlers = {};
   const location = { href: "https://www.youtube.com/watch?v=first" };
   const video = {
-    paused: false, muted: false, currentTime: 0, duration: 100,
+    paused: false, muted: false, volume: 1, currentTime: 0, duration: 100,
     pause() { this.paused = true; },
     play() { this.paused = false; return Promise.resolve(); }
   };
@@ -124,6 +124,36 @@ function setup({
 }
 
 const sequence = ["0", "1", "2", "3", "4", "5", "6", "9"];
+
+Deno.test("video volume reports, changes and unmutes without changing playback", () => {
+  const app = setup();
+  const observer = app.connect();
+  app.video.paused = true;
+  app.video.muted = true;
+  app.video.volume = 0.4;
+  const initial = app.send("status");
+  assert.equal(initial.videoVolume, 0.4);
+  assert.equal(initial.videoMuted, true);
+  const changed = app.send("video-volume", { volume: 65 });
+  assert.equal(changed.videoVolume, 0.65);
+  assert.equal(changed.videoMuted, false);
+  assert.equal(app.video.paused, true);
+  app.videoEvent("volumechange");
+  assert.equal(observer.updates.at(-1).videoVolume, 0.65);
+  assert.equal(observer.updates.at(-1).videoMuted, false);
+  assert.equal(app.send("video-volume", { volume: 0 }).videoVolume, 0);
+});
+
+Deno.test("video volume rejects invalid values and unavailable players", () => {
+  const app = setup();
+  for (const volume of [-1, 101, NaN, "20"]) {
+    assert.equal(app.send("video-volume", { volume }).ok, false);
+  }
+  assert.equal(app.video.volume, 1);
+  app.removeVideo();
+  assert.equal(app.send("video-volume", { volume: 50 }).ok, false);
+  assert.equal(app.send("status").videoVolume, null);
+});
 
 Deno.test("video seek moves five seconds, clamps to video bounds, and preserves playback state", () => {
   const app = setup();
@@ -249,6 +279,51 @@ Deno.test("shared tempo changes take effect at the same future beat", () => {
   assert.equal(app.send("status").bpm, 60);
   app.advance(2200);
   assert.equal(app.send("status").currentStep, 0);
+});
+
+Deno.test("shared tempo changes wake at the new clock even between old beats", () => {
+  const app = setup();
+  app.send("play", { sequence: ["1", "2", "3"], bpm: 120, clock: { startAt: 1000200, step: 0 } });
+  app.advance(200);
+  app.send("sync-clock", { bpm: 90, clock: { startAt: 1000900, step: 2 } });
+  app.advance(700);
+  assert.equal(app.send("status").currentStep, 1);
+  app.advance(900);
+  assert.equal(app.send("status").bpm, 90);
+  assert.equal(app.send("status").currentStep, 2);
+});
+
+Deno.test("replacing a pending shared clock cancels its earlier wakeup", () => {
+  const app = setup();
+  app.send("play", { sequence: ["1", "2", "3"], bpm: 120, clock: { startAt: 1000200, step: 0 } });
+  app.advance(200);
+  app.send("sync-clock", { bpm: 90, clock: { startAt: 1000400, step: 1 } });
+  app.send("sync-clock", { bpm: 60, clock: { startAt: 1001200, step: 2 } });
+  app.advance(400);
+  assert.equal(app.send("status").currentStep, 0);
+  app.advance(700);
+  assert.equal(app.send("status").currentStep, 1);
+  app.advance(1200);
+  assert.equal(app.send("status").bpm, 60);
+  assert.equal(app.send("status").currentStep, 2);
+});
+
+Deno.test("a slow shared sequence speeds up on the same beat in each voice", () => {
+  const first = setup();
+  const second = setup();
+  for (const app of [first, second]) {
+    app.send("play", { sequence: ["1", "2"], bpm: 1, clock: { startAt: 1000200, step: 0 } });
+    app.advance(200);
+    app.advance(400);
+    app.send("sync-clock", { bpm: 120, clock: { startAt: 1001250, step: 1 } });
+    app.advance(1249);
+    assert.equal(app.send("status").currentStep, 0);
+    app.advance(1250);
+    assert.equal(app.send("status").bpm, 120);
+    assert.equal(app.send("status").currentStep, 1);
+    app.advance(1750);
+    assert.equal(app.send("status").currentStep, 0);
+  }
 });
 
 Deno.test("video control pauses independently of the sequencer and a pad resumes it", async () => {

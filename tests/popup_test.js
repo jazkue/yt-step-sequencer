@@ -261,6 +261,12 @@ async function setup({
     settings: elements.get("#settings"),
     transport: elements.get("#transport"),
     videoPlayback: elements.get("#video-playback"),
+    videoVolume: elements.get("#video-volume"),
+    setVideoVolume: value => {
+      const input = elements.get("#video-volume");
+      input.value = String(value);
+      input.listeners.input();
+    },
     toggleVideo: () => elements.get("#video-playback").listeners.click(),
     emit: message => portMessage(message),
     isPadForbidden: key => runInContext(`prohibitedPads.has("${key}")`, context),
@@ -278,6 +284,8 @@ async function setup({
     },
     metronome: elements.get("#metronome"),
     bpm: elements.get("#bpm"),
+    increaseBpm: () => elements.get("#bpm-increase").listeners.click(),
+    decreaseBpm: () => elements.get("#bpm-decrease").listeners.click(),
     status: elements.get("#status"),
     tap: time => { now = time; elements.get("#tap-tempo").listeners.click(); },
     selectStep: index => runInContext(`selectStep(${index})`, context),
@@ -290,7 +298,10 @@ async function setup({
       });
       return prevented;
     },
-    releaseKey: key => document.listeners.keyup[0]({ key }),
+    releaseKey: (key, options = {}) => document.listeners.keyup[0]({ key, ...options }),
+    pointerDown: () => {
+      for (const listener of document.listeners.pointerdown) listener({ target: elements.get("#pad-mode") });
+    },
     blurWindow: () => windowListeners.blur(),
     clickPad: (key, event = { detail: 1 }) => {
       const button = elements.get("#pads").children["1234567890".indexOf(key)].children[0];
@@ -659,6 +670,117 @@ Deno.test("BPM entry rejects decimals and tap tempo restores a valid value", asy
   assert.equal(app.status.classList.contains("error"), false);
 });
 
+Deno.test("incoming chorus tempo does not overwrite a manual BPM draft", async () => {
+  const app = await setup();
+  app.bpm.value = "145";
+  app.bpm.listeners.input();
+  app.updateSession(session => { session.bpm = 130; });
+  assert.equal(app.bpm.value, "145");
+  app.bpm.listeners.change();
+  await app.settle();
+  assert.equal(app.bpm.value, "145");
+  app.updateSession(session => { session.bpm = 140; });
+  assert.equal(app.bpm.value, "140");
+});
+
+Deno.test("queued BPM changes do not overwrite a newer manual draft", async () => {
+  const app = await setup();
+  app.tap(1000);
+  app.tap(1500);
+  app.bpm.value = "90";
+  app.bpm.listeners.input();
+  await app.settle();
+  assert.equal(app.bpm.value, "90");
+  app.bpm.listeners.change();
+  await app.settle();
+  assert.equal(app.bpm.value, "90");
+});
+
+Deno.test("tap and rapid BPM adjustments retain the latest requested value", async () => {
+  const app = await setup();
+  app.tap(1000);
+  app.tap(1523);
+  app.updateSession(session => { session.bpm = 130; });
+  assert.equal(app.bpm.value, "115");
+  app.increaseBpm();
+  app.increaseBpm();
+  app.decreaseBpm();
+  await app.settle();
+  assert.equal(app.bpm.value, "116");
+});
+
+Deno.test("video volume tracks YouTube, controls only its video, and reports failures", async () => {
+  const messages = [];
+  let fail = false;
+  const app = await setup({
+    connected: true,
+    sendMessage: async (tab, message) => {
+      if (message.type.endsWith(":status")) {
+        return { ok: true, playing: false, videoId: "first", videoVolume: 0.75, videoMuted: false };
+      }
+      if (message.type.endsWith(":video-volume")) {
+        messages.push({ tab, volume: message.volume });
+        return fail ? { ok: false, error: "volume unavailable" } :
+          { ok: true, videoVolume: message.volume / 100, videoMuted: false };
+      }
+      return { ok: true };
+    }
+  });
+  assert.equal(app.videoVolume.disabled, false);
+  assert.equal(app.videoVolume.value, "75");
+  app.emit({ videoVolume: 0.4, videoMuted: true });
+  assert.equal(app.videoVolume.value, "0");
+  app.videoVolume.focus();
+  assert.equal(app.pressKey("ArrowLeft"), false);
+  assert.equal(app.pressKey("2"), false);
+  app.setVideoVolume(50);
+  app.setVideoVolume(70);
+  await app.settle();
+  assert.deepEqual(messages, [{ tab: 1, volume: 70 }]);
+  assert.equal(app.videoVolume.value, "70");
+  fail = true;
+  app.setVideoVolume(20);
+  await app.settle();
+  assert.equal(app.videoVolume.value, "70");
+  assert.equal(app.status.textContent, "volume unavailable");
+  app.updateSession(session => { session.voices["1"].tabId = null; });
+  assert.equal(app.videoVolume.disabled, true);
+});
+
+Deno.test("video volume keeps the latest drag value while a command is pending", async () => {
+  let resolveFirst;
+  let signalStarted;
+  const started = new Promise(resolve => { signalStarted = resolve; });
+  const volumes = [];
+  const app = await setup({
+    connected: true,
+    sendMessage: async (_tab, message) => {
+      if (message.type.endsWith(":status")) {
+        return { ok: true, playing: false, videoId: "first", videoVolume: 1, videoMuted: false };
+      }
+      if (message.type.endsWith(":video-volume")) {
+        volumes.push(message.volume);
+        if (volumes.length === 1) {
+          signalStarted();
+          return new Promise(resolve => { resolveFirst = resolve; });
+        }
+        return { ok: true, videoVolume: message.volume / 100, videoMuted: false };
+      }
+      return { ok: true };
+    }
+  });
+  app.setVideoVolume(25);
+  await started;
+  app.setVideoVolume(70);
+  app.setVideoVolume(80);
+  app.emit({ videoVolume: 0.25, videoMuted: false });
+  assert.equal(app.videoVolume.value, "80");
+  resolveFirst({ ok: true, videoVolume: 0.25, videoMuted: false });
+  await app.settle();
+  assert.deepEqual(volumes, [25, 80]);
+  assert.equal(app.videoVolume.value, "80");
+});
+
 Deno.test("arrow keys seek the video, including repeats, except while editing text", async () => {
   const messages = [];
   const app = await setup({
@@ -769,6 +891,107 @@ Deno.test("assigning pads advances the selected step with mouse and keyboard", a
   assert.equal(app.steps.children[7].children[0].value, "5");
   assert.equal(app.steps.children[0].classList.contains("selected"), true);
   assert.equal(app.form.submissions, 1);
+});
+
+Deno.test("space and tab empty selected steps and advance without playing the video", async () => {
+  const messages = [];
+  const app = await setup({
+    sendMessage: async (_tab, message) => { messages.push(message); return { ok: true }; }
+  });
+  app.connect();
+  app.updateState({ playing: false, videoPaused: true });
+  app.focusStep(0);
+  assert.equal(app.pressKey(" "), true);
+  assert.equal(app.steps.children[0].children[0].value, "");
+  assert.equal(app.activeElement(), app.steps.children[1].children[0]);
+  assert.equal(app.pressKey(" ", 0, { repeat: true }), true);
+  assert.equal(app.steps.children[1].children[0].value, "1");
+  assert.equal(app.pressKey("Tab"), true);
+  assert.equal(app.steps.children[1].children[0].value, "");
+  assert.equal(app.activeElement(), app.steps.children[2].children[0]);
+  assert.equal(app.pressKey("Tab", 0, { shiftKey: true }), false);
+  await app.settle();
+  assert.deepEqual(app.storageSets.at(-1).sequence.slice(0, 3), ["", "", "2"]);
+  assert.equal(messages.some(message => message.type.endsWith(":video-toggle")), false);
+
+  app.selectStep(7);
+  app.padButton("1").focus();
+  assert.equal(app.pressKey(" "), true);
+  assert.equal(app.steps.children[7].children[0].value, "");
+  assert.equal(app.steps.children[0].classList.contains("selected"), true);
+  assert.equal(app.form.submissions, 1);
+});
+
+Deno.test("space and tab do not change locked steps or other controls", async () => {
+  const app = await setup({
+    saved: { lockedSteps: [0] },
+    sendMessage: async () => ({ ok: true })
+  });
+  app.connect();
+  app.updateState({ playing: false });
+  app.focusStep(0);
+  assert.equal(app.pressKey(" "), true);
+  assert.equal(app.pressKey("Tab"), true);
+  assert.equal(app.steps.children[0].children[0].value, "0");
+  assert.equal(app.steps.children[0].classList.contains("selected"), true);
+  const otherControl = { closest: () => ({}) };
+  assert.equal(app.pressKey(" ", 0, { target: otherControl }), false);
+  assert.equal(app.pressKey("Tab", 0, { target: otherControl }), false);
+});
+
+Deno.test("emptying a selected step updates the running sequence", async () => {
+  const messages = [];
+  const app = await setup({
+    sendMessage: async (_tab, message) => {
+      messages.push(message);
+      return { ok: true, playing: true, sequence: ["", "1", "2", "3", "4", "5", "6", "7"] };
+    }
+  });
+  app.connect();
+  app.updateState({ playing: true });
+  app.focusStep(0);
+  app.pressKey("Tab");
+  await app.settle();
+  assert.equal(messages.some(message =>
+    message.type.endsWith(":update") && message.step === 0 && message.value === ""
+  ), true);
+  assert.equal(app.storageSets.at(-1).sequence[0], "");
+});
+
+Deno.test("tapping Control toggles pad mode without disrupting shortcuts", async () => {
+  const app = await setup();
+  app.pressKey("Control", 0, { ctrlKey: true });
+  app.releaseKey("Control");
+  assert.equal(app.padMode.checked, true);
+  app.connect();
+  app.updateState({ playing: false });
+  app.bpm.focus();
+  app.pressKey("Control", 0, { ctrlKey: true });
+  app.pressKey("Control", 0, { ctrlKey: true, repeat: true });
+  assert.equal(app.padMode.checked, true);
+  app.releaseKey("Control");
+  assert.equal(app.padMode.checked, false);
+  assert.equal(app.padControls("1")[1].hidden, true);
+  assert.equal(app.padMode.attributes["aria-label"], "pad mode: rec");
+  app.pressKey("Control", 0, { ctrlKey: true });
+  assert.equal(app.pressKey("c", 0, { ctrlKey: true }), false);
+  app.releaseKey("Control");
+  assert.equal(app.padMode.checked, false);
+  app.pressKey("Control", 0, { ctrlKey: true });
+  app.pointerDown();
+  app.releaseKey("Control");
+  assert.equal(app.padMode.checked, false);
+  app.pressKey("Control", 0, { ctrlKey: true });
+  app.blurWindow();
+  app.releaseKey("Control");
+  assert.equal(app.padMode.checked, false);
+  app.pressKey("Control", 0, { ctrlKey: true, shiftKey: true });
+  app.releaseKey("Control", { shiftKey: true });
+  assert.equal(app.padMode.checked, false);
+  app.pressKey("Control", 0, { ctrlKey: true });
+  app.releaseKey("Control");
+  assert.equal(app.padMode.checked, true);
+  assert.equal(app.padControls("1")[1].hidden, false);
 });
 
 Deno.test("pad rec mode captures clicks and keys without playing or editing the sequence", async () => {

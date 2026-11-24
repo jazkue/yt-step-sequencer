@@ -32,6 +32,21 @@ h1 {
   font-weight: 600;
 }
 
+.video-header { position: relative; width: 332px; display: flow-root; }
+#video-volume {
+  position: absolute;
+  left: -26px;
+  top: 0;
+  width: 16px;
+  height: 52px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  writing-mode: vertical-lr;
+  direction: rtl;
+  accent-color: var(--accent);
+}
 .header {
   display: flex;
   align-items: center;
@@ -245,18 +260,10 @@ input:disabled { opacity: 0.5; }
   cursor: default;
 }
 
-.tempo button:active:not(:disabled) {
-  background: var(--surface);
-}
-
 #tap-tempo {
   width: 36px !important;
   height: 36px !important;
   font-size: 11px;
-}
-
-#tap-tempo:active:not(:disabled) {
-  filter: brightness(0.9);
 }
 
 .metronome {
@@ -271,6 +278,7 @@ input:disabled { opacity: 0.5; }
 }
 .tempo .metronome input { position: absolute; width: 1px; height: 1px; opacity: 0; }
 .metronome svg { width: 16px; height: 16px; fill: currentColor; }
+.metronome:active:has(input:not(:disabled)), .metronome:has(input:active:not(:disabled)) { background: var(--accent); }
 .metronome:has(input:checked) { background: var(--accent); }
 .metronome:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
 .metronome:has(input:disabled) { opacity: 0.4; cursor: default; }
@@ -299,7 +307,7 @@ button.playing .stop-icon { display: block; }
   align-items: center;
   gap: 5px;
   width: 332px;
-  margin: 0 0 24px;
+  margin: 0 0 8px;
 }
 #video-info:has(#video-title:empty) { display: none; }
 #video-playback {

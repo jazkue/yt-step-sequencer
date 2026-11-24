@@ -14,8 +14,9 @@ function setup({ sourceWindow, displays, create = async () => {}, open = [] }) {
   const stopped = [];
   const store = {};
   const cleared = [];
+  let now = 0;
   runInNewContext(source, {
-    performance: { timeOrigin: 1000000, now: () => 0 },
+    performance: { timeOrigin: 1000000, now: () => now },
     chrome: {
       action: { onClicked: { addListener: fn => { handler = fn; } } },
       windows: {
@@ -48,6 +49,7 @@ function setup({ sourceWindow, displays, create = async () => {}, open = [] }) {
   });
   return {
     handler, windows, errors, updated, stopped, cleared,
+    advance: time => { now = time; },
     send: (type, data = {}) => new Promise(resolve =>
       messageHandler({ type: `yt-step-sequencer:chorus-${type}`, ...data }, {}, resolve)),
     removeWindow: windowRemoved,
@@ -154,6 +156,17 @@ Deno.test("chorus shares transport, tempo and length while protecting all locked
   assert.equal(changed.session.bpm, 90);
   assert.equal(changed.session.clockVersion, 2);
   assert.equal((await app.send("transport", { playing: false })).session.clock, null);
+});
+
+Deno.test("speeding up from a slow tempo schedules the next beat promptly", async () => {
+  const app = setup({ sourceWindow: {}, displays: [] });
+  await app.send("register", { windowId: 1, tabId: 11, videoId: "a" });
+  await app.send("bpm", { bpm: 1 });
+  await app.send("transport", { playing: true });
+  app.advance(400);
+  const changed = await app.send("bpm", { bpm: 120 });
+  assert.equal(changed.session.clock.startAt, 1001250);
+  assert.equal(changed.session.clock.step, 1);
 });
 
 Deno.test("voices can join playback and retain their sequence after losing or replacing a video", async () => {

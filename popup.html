@@ -9,34 +9,38 @@
   </head>
   <body>
     <main>
-      <div class="header">
-        <h1>yt step sequencer</h1>
-        <div class="options">
-          <button id="add-video" type="button" aria-label="add or choose video"
-            aria-expanded="false" aria-controls="video-menu" title="add or choose video">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 4h2v7h7v2h-7v7h-2v-7H4v-2h7z"></path></svg>
-          </button>
-          <div id="video-menu" hidden></div>
-          <button id="options-toggle" type="button" aria-label="randomization options"
-            aria-expanded="false" aria-controls="options-menu" title="randomization options">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M4 7h16l-8 13z"></path>
-            </svg>
-          </button>
-          <div id="options-menu" hidden>
-            <label>
-              <input id="include-empty-steps" type="checkbox">
-              empty steps when randomizing
-            </label>
+      <div class="video-header">
+        <input id="video-volume" type="range" min="0" max="100" step="1" value="100"
+          aria-label="video volume" title="video volume" disabled>
+        <div class="header">
+          <h1>yt step sequencer</h1>
+          <div class="options">
+            <button id="add-video" type="button" aria-label="add or choose video"
+              aria-expanded="false" aria-controls="video-menu" title="add or choose video">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 4h2v7h7v2h-7v7h-2v-7H4v-2h7z"></path></svg>
+            </button>
+            <div id="video-menu" hidden></div>
+            <button id="options-toggle" type="button" aria-label="randomization options"
+              aria-expanded="false" aria-controls="options-menu" title="randomization options">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 7h16l-8 13z"></path>
+              </svg>
+            </button>
+            <div id="options-menu" hidden>
+              <label>
+                <input id="include-empty-steps" type="checkbox">
+                empty steps when randomizing
+              </label>
+            </div>
           </div>
         </div>
-      </div>
-      <div id="video-info">
-        <button id="video-playback" type="button" aria-label="play video" title="play video" disabled>
-          <svg class="play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4v16l13-8z"></path></svg>
-          <svg class="pause-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h4v16H6zm8 0h4v16h-4z"></path></svg>
-        </button>
-        <p id="video-title"></p>
+        <div id="video-info">
+          <button id="video-playback" type="button" aria-label="play video" title="play video" disabled>
+            <svg class="play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4v16l13-8z"></path></svg>
+            <svg class="pause-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h4v16H6zm8 0h4v16h-4z"></path></svg>
+          </button>
+          <p id="video-title"></p>
+        </div>
       </div>
 
       <div class="sequencer-layout">

@@ -23,6 +23,7 @@ const padModeControl = document.querySelector("#pad-mode-control");
 const connectBox = document.querySelector("#connect");
 const videoTitle = document.querySelector("#video-title");
 const videoPlayback = document.querySelector("#video-playback");
+const videoVolume = document.querySelector("#video-volume");
 const link = document.querySelector("#link");
 const optionsToggle = document.querySelector("#options-toggle");
 const optionsMenu = document.querySelector("#options-menu");
@@ -36,8 +37,13 @@ let commandPending = false;
 let commandVersion = 0;
 let commandQueue = Promise.resolve();
 let bpmTimer = null;
+let bpmDraft = false;
+let pendingBpmCommands = 0;
 let transportPending = false;
 let videoPlaybackPending = false;
+let volumePending = false;
+let desiredVolume = null;
+let lastVideoVolume = null;
 let videoAvailable = false;
 let selectedStep = null;
 let lastStepSerial = -1;
@@ -57,6 +63,7 @@ let chorusReady = false;
 let localEnginePlaying = false;
 let appliedClockVersion = -1;
 let appliedMetronome = false;
+let controlTap = false;
 const TAP_TEMPO_THRESHOLD = 2000;
 
 async function chorusCommand(command, data = {}) {
@@ -156,7 +163,9 @@ function applyChorus(session) {
       });
     }
   }
-  if (!previous || previous.bpm !== session.bpm) bpmInput.value = String(session.bpm);
+  if ((!previous || previous.bpm !== session.bpm) && !bpmDraft && pendingBpmCommands === 0) {
+    bpmInput.value = String(session.bpm);
+  }
   metronomeInput.checked = session.metronome;
   playing = session.playing;
   transport.classList.toggle("playing", playing);
@@ -814,6 +823,17 @@ function toggleProhibitedPad(key) {
   });
 }
 
+function assignSelectedStep(value) {
+  if (selectedStep === null || lockedSteps.has(selectedStep)) return;
+  const input = inputs[selectedStep];
+  input.value = value;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  const stepHasFocus = inputs.includes(document.activeElement);
+  advanceStep();
+  if (stepHasFocus) inputs[selectedStep].focus();
+  else inputs[selectedStep].scrollIntoView({ block: "nearest", inline: "nearest" });
+}
+
 async function triggerPad(key) {
   const button = padButtons.get(key);
   if (!button || button.disabled) return;
@@ -821,15 +841,7 @@ async function triggerPad(key) {
     recordPad(key);
     return;
   }
-  if (selectedStep !== null && !lockedSteps.has(selectedStep)) {
-    const input = inputs[selectedStep];
-    input.value = key;
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    const stepHasFocus = inputs.includes(document.activeElement);
-    advanceStep();
-    if (stepHasFocus) inputs[selectedStep].focus();
-    else inputs[selectedStep].scrollIntoView({ block: "nearest", inline: "nearest" });
-  }
+  assignSelectedStep(key);
   if (prohibitedPads.has(key)) return;
   button.classList.add("active");
   clearTimeout(padTimers.get(key));
@@ -849,7 +861,21 @@ async function triggerPad(key) {
 }
 
 document.addEventListener("keydown", event => {
+  if (event.key === "Control") {
+    if (!event.repeat) controlTap = !event.altKey && !event.metaKey && !event.shiftKey;
+    return;
+  }
+  controlTap = false;
   if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+  if ((event.key === " " || event.key === "Tab") && selectedStep !== null &&
+      (inputs.includes(event.target) || [...padButtons.values()].includes(event.target) ||
+       event.target === nextStepButton || !event.target?.closest?.(
+         'button, input, select, textarea, a[href], [contenteditable]:not([contenteditable="false"])'
+       ))) {
+    event.preventDefault();
+    if (!event.repeat) assignSelectedStep("");
+    return;
+  }
   if (event.key === " " && !event.target?.closest?.(
     'button, input, select, textarea, a[href], [contenteditable]:not([contenteditable="false"])'
   )) {
@@ -860,7 +886,7 @@ document.addEventListener("keydown", event => {
   if ((event.key === "ArrowLeft" || event.key === "ArrowRight") &&
       tabId !== null && event.target !== bpmInput && !inputs.includes(event.target) &&
       !optionsMenu.contains(event.target) && event.target !== optionsToggle &&
-      event.target !== padMode) {
+      event.target !== padMode && event.target !== videoVolume) {
     event.preventDefault();
     send("seek", { direction: event.key === "ArrowLeft" ? "backward" : "forward" })
       .catch(error => showStatus(error.message || "could not seek the video.", true));
@@ -883,6 +909,7 @@ document.addEventListener("keydown", event => {
       event.target !== resetButton &&
       event.target !== padMode &&
       event.target !== videoPlayback &&
+      event.target !== videoVolume &&
       event.target !== transport &&
       event.target !== bpmDecrease && event.target !== bpmIncrease) {
     if (lockButtons.includes(event.target)) return;
@@ -892,7 +919,8 @@ document.addEventListener("keydown", event => {
     event.preventDefault();
     if (inputs.includes(document.activeElement)) document.activeElement.blur();
     selectStep(null);
-  } else if (/^[0-9]$/.test(event.key) && event.target !== bpmInput) {
+  } else if (/^[0-9]$/.test(event.key) && event.target !== bpmInput &&
+      event.target !== videoVolume) {
     event.preventDefault();
     const button = padButtons.get(event.key);
     if (!padMode.checked && button && !button.disabled && !lockedPads.has(event.key)) {
@@ -904,13 +932,22 @@ document.addEventListener("keydown", event => {
 
 document.addEventListener("keyup", event => {
   padButtons.get(event.key)?.classList.remove("record-pressed");
+  if (event.key === "Control") {
+    if (controlTap && !event.altKey && !event.metaKey && !event.shiftKey && !padMode.disabled) {
+      padMode.checked = !padMode.checked;
+      padMode.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    controlTap = false;
+  }
 });
 
 window.addEventListener("blur", () => {
+  controlTap = false;
   for (const button of padButtons.values()) button.classList.remove("record-pressed");
 });
 
 document.addEventListener("pointerdown", event => {
+  controlTap = false;
   if (selectedStep === null) return;
   if (steps.contains(event.target) || pads.contains(event.target) || padModeControl.contains(event.target) ||
       nextStepButton.contains(event.target)) return;
@@ -1105,6 +1142,7 @@ function updateState(state, hydrate = false) {
   localEnginePlaying = state.playing;
   playing = chorusSession ? chorusSession.playing : state.playing;
   if ("videoPaused" in state) updateVideoPlayback(state.videoPaused);
+  if ("videoVolume" in state) updateVideoVolume(state.videoVolume, state.videoMuted);
   if (Array.isArray(state.lockedSteps)) setLockedSteps(state.lockedSteps);
   settings.disabled = false;
   bpmInput.disabled = false;
@@ -1180,6 +1218,44 @@ function updateVideoPlayback(paused) {
   videoPlayback.title = label;
 }
 
+function updateVideoVolume(volume, muted) {
+  if (tabId === null) return;
+  if (!Number.isFinite(volume) || volume < 0 || volume > 1 || typeof muted !== "boolean") {
+    lastVideoVolume = null;
+    videoVolume.disabled = true;
+    return;
+  }
+  lastVideoVolume = { volume, muted };
+  videoVolume.disabled = false;
+  if (!volumePending) {
+    const percent = muted ? 0 : Math.round(volume * 100);
+    videoVolume.value = String(percent);
+    videoVolume.setAttribute("aria-valuetext", muted ? "muted" : `${percent}%`);
+  }
+}
+
+videoVolume.addEventListener("input", () => {
+  desiredVolume = Number(videoVolume.value);
+  if (volumePending) return;
+  volumePending = true;
+  enqueue(async () => {
+    try {
+      while (desiredVolume !== null && tabId !== null) {
+        const volume = desiredVolume;
+        desiredVolume = null;
+        const state = await send("video-volume", { volume });
+        updateVideoVolume(state.videoVolume, state.videoMuted);
+      }
+    } catch (error) {
+      desiredVolume = null;
+      showStatus(error.message || "could not change the video volume.", true);
+    } finally {
+      volumePending = false;
+      if (lastVideoVolume) updateVideoVolume(lastVideoVolume.volume, lastVideoVolume.muted);
+    }
+  });
+});
+
 function updateStepIndicator(state) {
   if (!Number.isInteger(state.stepSerial) || state.stepSerial < lastStepSerial) return;
   if ("padValue" in state) updatePadIndicator(state.padValue);
@@ -1224,6 +1300,9 @@ function setUnavailable(message) {
   includeEmptyStepsInput.disabled = !chorusReady;
   transport.disabled = !chorusReady;
   videoPlayback.disabled = true;
+  videoVolume.disabled = true;
+  desiredVolume = null;
+  lastVideoVolume = null;
   showStatus(message, true);
 }
 
@@ -1367,20 +1446,32 @@ function applyBpm() {
   if (bpmTimer === null) return;
   clearTimeout(bpmTimer);
   bpmTimer = null;
-  if (validBpmInput()) setChorusBpm(Number(bpmInput.value));
+  if (validBpmInput()) {
+    bpmDraft = false;
+    setChorusBpm(Number(bpmInput.value));
+  }
 }
 
 function setChorusBpm(bpm) {
+  pendingBpmCommands++;
   enqueue(async () => {
     try {
-      await chorusCommand("bpm", { bpm });
+      const previous = chorusSession;
+      const session = await chorusCommand("bpm", { bpm });
+      if (chorusSession === previous) applyChorus(session);
     } catch (error) {
       showStatus(error.message || "could not change the bpm.", true);
+    } finally {
+      pendingBpmCommands--;
+      if (pendingBpmCommands === 0 && !bpmDraft && chorusSession) {
+        bpmInput.value = String(chorusSession.bpm);
+      }
     }
   });
 }
 
 bpmInput.addEventListener("input", () => {
+  bpmDraft = true;
   clearTimeout(bpmTimer);
   bpmTimer = null;
   if (!markBpmValidity()) {
@@ -1416,6 +1507,7 @@ function adjustBpm(amount) {
   if (bpm === Number(bpmInput.value)) return;
   clearTimeout(bpmTimer);
   bpmTimer = null;
+  bpmDraft = false;
   bpmInput.value = String(bpm);
   setChorusBpm(bpm);
 }
@@ -1438,6 +1530,7 @@ function handleTapTempo() {
   if (bpm >= 1 && bpm <= 999) {
     clearTimeout(bpmTimer);
     bpmTimer = null;
+    bpmDraft = false;
     bpmInput.value = String(bpm);
     markBpmValidity();
     status.classList.remove("error");
@@ -1563,6 +1656,7 @@ async function initialize() {
     port.onMessage.addListener(message => {
       if (tabId === null) return;
       if ("videoPaused" in message) updateVideoPlayback(message.videoPaused);
+      if ("videoVolume" in message) updateVideoVolume(message.videoVolume, message.videoMuted);
       if (Array.isArray(message.lockedSteps)) setLockedSteps(message.lockedSteps);
       if (message.metronomeError) {
         chorusCommand("metronome", { enabled: false }).catch(error =>
