@@ -6,9 +6,6 @@
   let currentStep = -1;
   let nextStep = 0;
   let nextTime = 0;
-  let recordedBeats = [];
-  let metronomeDelay = 0;
-  let warnedAboutAudioTiming = false;
   let videoId = null;
   let generation = 0;
   let stepSerial = 0;
@@ -27,10 +24,6 @@
   let metronomeEnabled = false;
   let metronomeAudio = null;
   let metronomeRequest = 0;
-  let recordingSequence = false;
-  let waitingForRecordingPad = false;
-  let recordingSave = Promise.resolve();
-  let recordingSaveError = null;
   const playbackFailure = "Could not start the video. Press play on YouTube and try again.";
   const observers = new Set();
 
@@ -41,9 +34,6 @@
 
   function stop() {
     generation++;
-    if (recordingSequence) metronomeEnabled = false;
-    recordingSequence = false;
-    waitingForRecordingPad = false;
     resumeAttempt = null;
     manuallyPaused = false;
     playbackError = null;
@@ -52,8 +42,6 @@
     sequence = null;
     bpm = null;
     currentStep = -1;
-    recordedBeats = [];
-    metronomeDelay = 0;
     stepValue = null;
     padValue = null;
     randomizeOnStart = false;
@@ -67,7 +55,7 @@
     return {
       playing: sequence !== null, sequence, bpm, currentStep, stepValue, stepSerial,
       timingDelays, playbackError, padValue, randomizeOnStart, prohibitedPads, lockedSteps,
-      includeEmptySteps, recordedPadTimes, metronomeEnabled, recordingSequence, videoId: currentVideoId(),
+      includeEmptySteps, recordedPadTimes, metronomeEnabled, videoId: currentVideoId(),
       videoDuration: Number.isFinite(duration) && duration >= 0 ? duration : null,
       videoPaused: video ? video.paused : null
     };
@@ -133,38 +121,6 @@
     return (duration * keyNumber) / 10;
   }
 
-  function recordingStep(pressedAt) {
-    const time = pressedAt === undefined ? performance.now() : pressedAt - performance.timeOrigin;
-    let closest = nextTime > performance.now() ? { step: nextStep, time: nextTime + metronomeDelay } : null;
-    for (const beat of recordedBeats) {
-      if (beat.step < sequence.length && (!closest ||
-          (Math.abs(time - beat.time) < Math.abs(time - closest.time) ||
-           (Math.abs(time - beat.time) === Math.abs(time - closest.time) && beat.time > closest.time)))) {
-        closest = beat;
-      }
-    }
-    return closest ? closest.step : currentStep;
-  }
-
-  function metronomeOutputTime(contextTime, scheduledAt) {
-    const timestamp = metronomeAudio.getOutputTimestamp?.();
-    if (timestamp && Number.isFinite(timestamp.contextTime) && Number.isFinite(timestamp.performanceTime) &&
-        (timestamp.contextTime !== 0 || timestamp.performanceTime !== 0)) {
-      // Map the scheduled audio time onto the performance clock used by pad events.
-      return Math.max(scheduledAt, timestamp.performanceTime + (contextTime - timestamp.contextTime) * 1000);
-    }
-    const baseLatency = metronomeAudio.baseLatency;
-    const outputLatency = metronomeAudio.outputLatency;
-    if (!Number.isFinite(baseLatency) && !Number.isFinite(outputLatency) && !warnedAboutAudioTiming) {
-      console.warn("Metronome output timing is unavailable; recording uses the scheduled beat time.");
-      warnedAboutAudioTiming = true;
-    }
-    return scheduledAt + 1000 * (
-      (Number.isFinite(baseLatency) ? Math.max(0, baseLatency) : 0) +
-      (Number.isFinite(outputLatency) ? Math.max(0, outputLatency) : 0)
-    );
-  }
-
   function notifyObservers(message) {
     for (const port of observers) {
       try {
@@ -174,18 +130,6 @@
         console.warn("Could not send step update:", error);
       }
     }
-  }
-
-  function saveRecordedSequence() {
-    const snapshot = sequence.slice();
-    recordingSave = recordingSave.then(async () => {
-      await chrome.storage.local.set({ sequence: snapshot });
-      recordingSaveError = null;
-    }).catch(error => {
-      recordingSaveError = error.message || "Could not save the recorded sequence.";
-      console.error("Could not save the recorded sequence:", error);
-      notifyObservers({ recordingError: recordingSaveError });
-    });
   }
 
   function playMetronome(step) {
@@ -200,14 +144,11 @@
       gain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
       oscillator.connect(gain);
       gain.connect(metronomeAudio.destination);
-      const scheduledAt = performance.now();
       oscillator.start(now);
       oscillator.stop(now + 0.05);
-      if (recordingSequence) return metronomeOutputTime(now, scheduledAt);
     } catch (error) {
       metronomeEnabled = false;
       console.error("Could not play the metronome:", error);
-      if (recordingSequence) stop();
       notifyObservers({ ...state(), metronomeError: error.message || "Metronome audio is unavailable." });
     }
   }
@@ -261,14 +202,7 @@
       padValue = stepValue;
     }
     stepSerial++;
-    const heardAt = playMetronome(currentStep);
-    if (!sequence) return;
-    if (recordingSequence) {
-      recordedBeats.push({ step: currentStep, time: heardAt });
-      // Keep enough history for audio and input delays without growing indefinitely.
-      if (recordedBeats.length > 256) recordedBeats.shift();
-      metronomeDelay = Math.max(0, heardAt - startTime);
-    }
+    playMetronome(currentStep);
     notifyObservers({
       currentStep, stepValue, padValue, stepSerial, timingDelays,
       ...(randomized && { sequence, randomized })
@@ -280,7 +214,7 @@
     }
     timer = setTimeout(tick, Math.max(0, nextTime - now));
     if (!video.paused) manuallyPaused = false;
-    if (!waitingForRecordingPad && !manuallyPaused) resumeVideo(video);
+    if (!manuallyPaused) resumeVideo(video);
   }
 
   document.addEventListener("yt-navigate-finish", () => {
@@ -323,7 +257,6 @@
             return;
           }
           manuallyPaused = false;
-          waitingForRecordingPad = false;
           notifyObservers({ videoPaused: video.paused });
           sendResponse({ ok: true, ...state() });
         }, () => sendResponse({ ok: false, error: playbackFailure }));
@@ -343,10 +276,6 @@
       }
       const request = ++metronomeRequest;
       if (!message.enabled) {
-        if (recordingSequence) {
-          sendResponse({ ok: false, error: "Stop recording before turning off the metronome." });
-          return;
-        }
         metronomeEnabled = false;
         sendResponse({ ok: true, metronomeEnabled });
         return;
@@ -386,35 +315,9 @@
       return true;
     }
     if (message.type === `${MESSAGE_PREFIX}stop`) {
-      const wasRecording = recordingSequence;
       stop();
-      const stopped = state();
-      if (wasRecording) {
-        recordingSave.then(() => sendResponse({
-          ok: true, ...stopped,
-          ...(recordingSaveError && { recordingError: recordingSaveError })
-        }));
-        return true;
-      }
-      sendResponse({ ok: true, ...stopped });
+      sendResponse({ ok: true, ...state() });
       return;
-    }
-    if (message.type === `${MESSAGE_PREFIX}finish-recording`) {
-      const video = document.querySelector(".html5-video-player")?.querySelector("video");
-      if (!recordingSequence || !sequence || currentVideoId() !== videoId || !video) {
-        sendResponse({ ok: false, error: "The sequence is no longer recording." });
-        return;
-      }
-      recordingSequence = false;
-      waitingForRecordingPad = false;
-      metronomeEnabled = false;
-      notifyObservers({ ...state(), recordingFinished: true });
-      if (!manuallyPaused) resumeVideo(video);
-      recordingSave.then(() => sendResponse({
-        ok: true, ...state(),
-        ...(recordingSaveError && { recordingError: recordingSaveError })
-      }));
-      return true;
     }
     if (message.type === `${MESSAGE_PREFIX}prohibited`) {
       if (!validProhibitedPads(message.prohibitedPads)) {
@@ -462,25 +365,11 @@
         sendResponse({ ok: false, error: "Enter a valid timecode." });
         return;
       }
-      if (message.pressedAt !== undefined &&
-          (!Number.isFinite(message.pressedAt) || message.pressedAt < 0)) {
-        sendResponse({ ok: false, error: "Enter a valid pad press time." });
-        return;
-      }
       const player = document.querySelector(".html5-video-player");
       const video = player?.querySelector("video");
       if (!currentVideoId() || !player || !video) {
         sendResponse({ ok: false, error: "Open a YouTube video and wait for the player to load." });
         return;
-      }
-      const recordingPad = recordingSequence && sequence && currentVideoId() === videoId && currentStep >= 0;
-      if (recordingPad) {
-        const recordedStep = recordingStep(message.pressedAt);
-        if (!lockedSteps.includes(recordedStep)) {
-          sequence[recordedStep] = message.key;
-          saveRecordedSequence();
-          notifyObservers({ ...state(), sequence: sequence.slice(), recordedStep });
-        }
       }
       const timecode = message.timecode;
       if (timecode !== undefined) video.currentTime = timecode;
@@ -492,7 +381,6 @@
           () => {
             if (attempt === generation && videoControlAttempt === videoControlVersion) {
               manuallyPaused = false;
-              if (recordingPad) waitingForRecordingPad = false;
             }
             sendResponse({ ok: true });
           },
@@ -501,7 +389,6 @@
         return true;
       }
       manuallyPaused = false;
-      if (recordingPad) waitingForRecordingPad = false;
       sendResponse({ ok: true });
       return;
     }
@@ -567,14 +454,6 @@
         sendResponse({ ok: false, error: "Unlock steps before removing them." });
         return;
       }
-      if (message.recordingSequence !== undefined && typeof message.recordingSequence !== "boolean") {
-        sendResponse({ ok: false, error: "Recording setting must be on or off." });
-        return;
-      }
-      if (message.recordingSequence && !metronomeEnabled) {
-        sendResponse({ ok: false, error: "Enable the metronome before recording." });
-        return;
-      }
       if (message.prohibitedPads !== undefined && !validProhibitedPads(message.prohibitedPads)) {
         sendResponse({ ok: false, error: "Forbidden pads must be unique digits from 0 to 9." });
         return;
@@ -591,9 +470,7 @@
       if (message.recordedPadTimes !== undefined) recordedPadTimes = { ...message.recordedPadTimes };
       if (message.includeEmptySteps !== undefined) includeEmptySteps = message.includeEmptySteps;
       if (message.lockedSteps !== undefined) lockedSteps = message.lockedSteps.slice();
-      const startRecording = message.recordingSequence === true;
       stop();
-      if (startRecording) metronomeEnabled = true;
       const attempt = generation;
       const start = () => {
         if (attempt !== generation || currentVideoId() !== id ||
@@ -604,10 +481,7 @@
         }
         sequence = message.sequence.slice();
         bpm = message.bpm;
-        recordingSequence = startRecording;
-        waitingForRecordingPad = startRecording;
-        if (recordingSequence) recordingSaveError = null;
-        randomizeOnStart = !recordingSequence && message.randomize === true;
+        randomizeOnStart = message.randomize === true;
         videoId = id;
         timingDelays = 0;
         nextTime = performance.now();
@@ -618,11 +492,6 @@
         }
         sendResponse({ ok: true, ...state() });
       };
-      if (startRecording) {
-        if (!video.paused) video.pause();
-        start();
-        return;
-      }
       if (video.paused) {
         video.play().then(start, () => {
           sendResponse({ ok: false, error: playbackFailure });
@@ -686,10 +555,6 @@
         }
         recordedPadTimes = { ...message.recordedPadTimes };
       } else if (message.randomize !== undefined) {
-        if (recordingSequence && message.randomize === true) {
-          sendResponse({ ok: false, error: "Stop recording before enabling automatic randomization." });
-          return;
-        }
         randomizeOnStart = message.randomize === true;
       } else if (message.bpm !== undefined) {
         if (!validBpm(message.bpm)) {
@@ -707,9 +572,6 @@
       } else {
         sendResponse({ ok: false, error: "No change was received." });
         return;
-      }
-      if (recordingSequence && (message.sequence !== undefined || message.step !== undefined)) {
-        saveRecordedSequence();
       }
       sendResponse({ ok: true, ...state() });
     }

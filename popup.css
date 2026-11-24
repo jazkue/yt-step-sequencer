@@ -241,9 +241,6 @@ input:disabled { opacity: 0.5; }
 .metronome:has(input:disabled) { opacity: 0.4; cursor: default; }
 
 .transport-controls { display: flex; gap: 5px; }
-#sequence-record { background: var(--surface); color: var(--error); }
-#sequence-record.recording { background: var(--error); color: var(--background); }
-
 button {
   display: grid;
   place-items: center;
