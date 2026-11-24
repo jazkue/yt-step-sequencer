@@ -9,7 +9,7 @@
     "48": "icons/mpc-48.png",
     "128": "icons/mpc-128.png"
   },
-  "permissions": ["activeTab", "storage", "system.display"],
+  "permissions": ["activeTab", "storage", "system.display", "tabs"],
   "action": {
     "default_title": "youtube step sequencer",
     "default_icon": {

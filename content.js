@@ -6,6 +6,8 @@
   let currentStep = -1;
   let nextStep = 0;
   let nextTime = 0;
+  let sharedClock = null;
+  let pendingClock = null;
   let videoId = null;
   let generation = 0;
   let stepSerial = 0;
@@ -46,6 +48,8 @@
     padValue = null;
     randomizeOnStart = false;
     nextStep = 0;
+    sharedClock = null;
+    pendingClock = null;
     videoId = null;
   }
 
@@ -184,8 +188,19 @@
       return;
     }
 
-    const interval = 60000 / bpm;
     const startTime = performance.now();
+    if (pendingClock && performance.timeOrigin + startTime >= pendingClock.clock.startAt) {
+      bpm = pendingClock.bpm;
+      sharedClock = { ...pendingClock.clock, beat: 0 };
+      nextTime = sharedClock.startAt - performance.timeOrigin;
+      pendingClock = null;
+    }
+    const interval = 60000 / bpm;
+    if (sharedClock) {
+      const elapsed = performance.timeOrigin + startTime - sharedClock.startAt;
+      sharedClock.beat = Math.max(sharedClock.beat, Math.floor(elapsed / interval));
+      nextStep = (sharedClock.step + sharedClock.beat) % sequence.length;
+    }
     if (startTime - nextTime >= interval) timingDelays++;
     currentStep = nextStep;
     nextStep = (nextStep + 1) % sequence.length;
@@ -207,10 +222,13 @@
       currentStep, stepValue, padValue, stepSerial, timingDelays,
       ...(randomized && { sequence, randomized })
     });
-    nextTime += interval;
     const now = performance.now();
-    if (nextTime - now < interval / 4) {
-      nextTime = now + interval;
+    if (sharedClock) {
+      sharedClock.beat++;
+      nextTime = sharedClock.startAt - performance.timeOrigin + sharedClock.beat * interval;
+    } else {
+      nextTime += interval;
+      if (nextTime - now < interval / 4) nextTime = now + interval;
     }
     timer = setTimeout(tick, Math.max(0, nextTime - now));
     if (!video.paused) manuallyPaused = false;
@@ -416,6 +434,26 @@
       sendResponse({ ok: true });
       return;
     }
+    if (message.type === `${MESSAGE_PREFIX}sync-clock`) {
+      if (!sequence || !sharedClock || currentVideoId() !== videoId) {
+        sendResponse({ ok: false, error: "The shared sequence is no longer playing." });
+        return;
+      }
+      if (!validBpm(message.bpm) || !message.clock ||
+          !Number.isFinite(message.clock.startAt) || message.clock.startAt < 0 ||
+          !Number.isSafeInteger(message.clock.step) || message.clock.step < 0) {
+        sendResponse({ ok: false, error: "Enter a valid shared clock and BPM." });
+        return;
+      }
+      pendingClock = { bpm: message.bpm, clock: message.clock };
+      const target = message.clock.startAt - performance.timeOrigin;
+      if (nextTime > target) {
+        clearTimeout(timer);
+        timer = setTimeout(tick, Math.max(0, target - performance.now()));
+      }
+      sendResponse({ ok: true, ...state() });
+      return;
+    }
     if (message.type === `${MESSAGE_PREFIX}scrub`) {
       if (typeof message.key !== "string" || !/^[0-9]$/.test(message.key)) {
         sendResponse({ ok: false, error: "Enter a digit from 0 to 9." });
@@ -444,6 +482,12 @@
       }
       if (!validSequence(message.sequence) || !validBpm(message.bpm)) {
         sendResponse({ ok: false, error: "Steps must be empty or a digit from 0 to 9, and BPM must be a whole number from 1 to 999." });
+        return;
+      }
+      if (message.clock !== undefined && (!message.clock ||
+          !Number.isFinite(message.clock.startAt) || message.clock.startAt < 0 ||
+          !Number.isSafeInteger(message.clock.step) || message.clock.step < 0)) {
+        sendResponse({ ok: false, error: "Enter a valid shared clock." });
         return;
       }
       if (message.lockedSteps !== undefined && !validLockedSteps(message.lockedSteps, message.sequence.length)) {
@@ -484,8 +528,17 @@
         randomizeOnStart = message.randomize === true;
         videoId = id;
         timingDelays = 0;
-        nextTime = performance.now();
-        tick();
+        if (message.clock) {
+          const interval = 60000 / bpm;
+          const now = performance.timeOrigin + performance.now();
+          const beat = Math.max(0, Math.ceil((now - message.clock.startAt) / interval));
+          sharedClock = { ...message.clock, beat };
+          nextTime = sharedClock.startAt - performance.timeOrigin + beat * interval;
+          timer = setTimeout(tick, Math.max(0, nextTime - performance.now()));
+        } else {
+          nextTime = performance.now();
+          tick();
+        }
         if (!sequence) {
           sendResponse({ ok: false, error: "Could not start the sequence or metronome." });
           return;

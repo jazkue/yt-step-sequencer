@@ -3,11 +3,20 @@ import { createContext, runInContext } from "node:vm";
 
 const source = await Deno.readTextFile(new URL("../popup.js", import.meta.url));
 
-async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [], saved = {}, sendMessage, connected = false } = {}) {
+async function setup({
+  left = 100, right = 1000, width = 412, frameHeight = 0, contentHeight = 460,
+  prohibitedPads = [], saved = {}, sendMessage, connected = false
+} = {}) {
   const popup = { id: 1, left, top: 100, width, height: 460 };
   const updates = [];
   const errors = [];
   const storageSets = [];
+  const session = {
+    bpm: saved.bpm || 120, length: saved.sequence?.length || 8, playing: false,
+    clock: null, clockVersion: 0, metronome: false, resetVersion: 0, voices: {},
+    recordedPadTimesByVideo: saved.recordedPadTimesByVideo || {}
+  };
+  let chorusListener;
   let now = 0;
   let portMessage;
 
@@ -67,7 +76,7 @@ async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [
     addEventListener(type, listener) {
       (this.listeners[type] ||= []).push(listener);
     },
-    documentElement: { scrollHeight: 460 }
+    documentElement: { get scrollHeight() { return Math.max(contentHeight, popup.height - frameHeight); } }
   };
   const steps = document.querySelector("#steps");
   Object.defineProperties(steps, {
@@ -84,17 +93,87 @@ async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [
 
   const context = createContext({
     document,
-    window: { innerHeight: 460, get innerWidth() { return popup.width; } },
+    window: { get innerHeight() { return popup.height - frameHeight; }, get innerWidth() { return popup.width; } },
     location: { search: connected ? "?tabId=1" : "" },
     URL,
     URLSearchParams,
     Event,
     performance: { timeOrigin: 1000000 },
     Date: { now: () => now },
-    console: { error: (...args) => errors.push(args) },
+    console: { error: (...args) => errors.push(args), warn() {} },
     chrome: {
+      runtime: {
+        connect: () => ({
+          onMessage: { addListener: listener => { chorusListener = listener; } },
+          onDisconnect: { addListener() {} }
+        }),
+        sendMessage: async message => {
+          const voice = session.voices["1"];
+          if (message.type.endsWith(":chorus-register")) {
+            session.voices["1"] = voice || {
+              tabId: message.tabId, videoId: message.videoId,
+              sequence: saved.sequence || Array.from({ length: 8 }, (_, index) => String(index)),
+              lockedSteps: saved.lockedSteps || [], prohibitedPads,
+              recordedPadTimesByVideo: saved.recordedPadTimesByVideo || {},
+              randomize: saved.randomize || false, includeEmptySteps: saved.includeEmptySteps !== false
+            };
+          } else if (message.type.endsWith(":chorus-voice")) {
+            Object.assign(voice, message.changes);
+            if (message.padTime) {
+              if (message.padTime.times === null) delete session.recordedPadTimesByVideo[message.padTime.videoId];
+              else session.recordedPadTimesByVideo[message.padTime.videoId] = message.padTime.times;
+            }
+            storageSets.push(JSON.parse(JSON.stringify({
+              ...message.changes,
+              ...(message.padTime && { recordedPadTimesByVideo: session.recordedPadTimesByVideo })
+            })));
+          } else if (message.type.endsWith(":chorus-length")) {
+            for (const item of Object.values(session.voices)) {
+              if (message.length > session.length) item.sequence.push("");
+              else item.sequence.pop();
+            }
+            session.length = message.length;
+          } else if (message.type.endsWith(":chorus-bpm")) {
+            session.bpm = message.bpm;
+            if (session.playing) session.clockVersion++;
+          } else if (message.type.endsWith(":chorus-metronome")) {
+            session.metronome = message.enabled;
+          } else if (message.type.endsWith(":chorus-transport")) {
+            session.playing = message.playing;
+            session.clock = message.playing ? { startAt: 1000100, step: 0 } : null;
+            session.clockVersion++;
+          } else if (message.type.endsWith(":chorus-unassign")) {
+            voice.tabId = null;
+            voice.videoId = null;
+          } else if (message.type.endsWith(":chorus-reset")) {
+            if (Object.values(session.voices).some(item => item.lockedSteps.some(index => index >= 8))) {
+              return { ok: false, error: "Unlock steps after step 8 in every voice before resetting." };
+            }
+            for (const item of Object.values(session.voices)) {
+              item.sequence = Array.from({ length: 8 }, (_, index) =>
+                item.lockedSteps.includes(index) ? item.sequence[index] : String(index)
+              );
+              item.prohibitedPads = [];
+              item.randomize = false;
+              if (item.videoId) delete session.recordedPadTimesByVideo[item.videoId];
+              storageSets.push({ prohibitedPads: [] });
+            }
+            session.length = 8;
+            session.resetVersion++;
+          }
+          const snapshot = JSON.parse(JSON.stringify(session));
+          chorusListener?.(snapshot);
+          return { ok: true, session: snapshot };
+        }
+      },
       tabs: {
-        sendMessage,
+        sendMessage: async (id, message) => {
+          const response = await sendMessage(id, message);
+          if (message.type.endsWith(":status") && response?.ok && !("videoId" in response)) {
+            return { ...response, videoId: "first" };
+          }
+          return response;
+        },
         get: async () => ({ id: 1, url: "https://www.youtube.com/watch?v=first", title: "Video" }),
         connect: () => ({
           onMessage: { addListener: listener => { portMessage = listener; } },
@@ -150,7 +229,15 @@ async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [
     isPadMarkedForbidden: key => runInContext(
       `padContainers.get("${key}").classList.contains("pad-prohibited")`, context
     ),
-    connect: () => runInContext("tabId = 1", context),
+    connect: () => {
+      session.voices["1"].tabId = 1;
+      session.voices["1"].videoId = "first";
+      runInContext('tabId = 1; videoId = "first"; chorusSession.voices["1"].tabId = 1', context);
+    },
+    updateSession: update => {
+      update(session);
+      chorusListener(JSON.parse(JSON.stringify(session)));
+    },
     metronome: elements.get("#metronome"),
     bpm: elements.get("#bpm"),
     status: elements.get("#status"),
@@ -172,8 +259,23 @@ async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [
     },
     form: elements.get("#sequencer"),
     activeElement: () => document.activeElement,
-    updateState: state => { context.testState = state; runInContext("updateState(testState)", context); },
-    settle: () => runInContext("commandQueue", context)
+    updateState: state => {
+      session.playing = state.playing;
+      if (typeof state.metronomeEnabled === "boolean") session.metronome = state.metronomeEnabled;
+      context.testState = state;
+      context.testSession = JSON.parse(JSON.stringify(session));
+      runInContext(`chorusSession = testSession;
+        appliedClockVersion = chorusSession.clockVersion;
+        if (typeof testState.metronomeEnabled === "boolean") appliedMetronome = testState.metronomeEnabled;
+        updateState(testState)`, context);
+    },
+    settle: async () => {
+      let queue;
+      do {
+        queue = runInContext("commandQueue", context);
+        await queue;
+      } while (queue !== runInContext("commandQueue", context));
+    }
   };
 }
 
@@ -188,6 +290,17 @@ Deno.test("adding steps grows right without scrolling or shifting the window", a
   assert.equal(app.popup.top, 100);
   assert.ok(app.popup.width >= 478);
   assert.equal(app.errors.length, 0);
+});
+
+Deno.test("editing an unassigned voice keeps its pads disabled", async () => {
+  const app = await setup();
+  const input = app.steps.children[0].children[0];
+  input.value = "9";
+  input.listeners.input();
+  await app.settle();
+  assert.equal(app.padButton("1").disabled, true);
+  assert.equal(app.padMode.disabled, true);
+  assert.ok(app.storageSets.some(value => value.sequence?.[0] === "9"));
 });
 
 Deno.test("adding steps stops growth at the display edge without hiding the start", async () => {
@@ -245,6 +358,18 @@ Deno.test("reset restores the default window size", async () => {
   assert.equal(app.errors.length, 0);
 });
 
+Deno.test("reset fits the content after restoring a window with browser frame height", async () => {
+  const app = await setup({ frameHeight: 40, contentHeight: 442 });
+  app.popup.width = 550;
+  app.popup.height = 600;
+  app.reset();
+  await app.settle();
+  assert.equal(app.popup.width, 412);
+  assert.equal(app.popup.height, 482);
+  assert.equal(app.popup.height - 40, 442);
+  assert.equal(app.errors.length, 0);
+});
+
 Deno.test("reset allows all pads and clears their forbidden state", async () => {
   const app = await setup({ prohibitedPads: ["1", "4"] });
   assert.equal(app.isPadForbidden("1"), true);
@@ -257,6 +382,58 @@ Deno.test("reset allows all pads and clears their forbidden state", async () => 
   assert.ok(app.storageSets.some(value =>
     Array.isArray(value.prohibitedPads) && value.prohibitedPads.length === 0
   ));
+});
+
+Deno.test("a global reset updates a playing voice's sequence, pads, times and randomization", async () => {
+  const messages = [];
+  const app = await setup({
+    prohibitedPads: ["1"],
+    saved: { sequence: ["9", "8"], lockedSteps: [0], randomize: true,
+      recordedPadTimesByVideo: { first: { "1": 25 } } },
+    sendMessage: async (_tab, message) => {
+      messages.push(message);
+      return { ok: true, playing: true };
+    }
+  });
+  app.connect();
+  app.updateState({ playing: true });
+  app.reset();
+  await app.settle();
+  assert.equal(app.steps.children[0].children[0].value, "9");
+  assert.equal(app.steps.children[1].children[0].value, "1");
+  assert.equal(app.isPadForbidden("1"), false);
+  assert.deepEqual(messages.map(message => message.type), [
+    "yt-step-sequencer:prohibited", "yt-step-sequencer:update",
+    "yt-step-sequencer:update", "yt-step-sequencer:update"
+  ]);
+  assert.equal(messages[1].randomize, false);
+  assert.equal(Object.keys(messages[2].recordedPadTimes).length, 0);
+  assert.deepEqual([...messages[3].sequence], ["9", "1", "2", "3", "4", "5", "6", "7"]);
+  assert.equal(app.steps.children.length, 8);
+});
+
+Deno.test("a reset initiated in another window updates this voice", async () => {
+  const messages = [];
+  const app = await setup({
+    prohibitedPads: ["1"],
+    saved: { sequence: ["9", "8"], randomize: true },
+    sendMessage: async (_tab, message) => {
+      messages.push(message);
+      return { ok: true, playing: false };
+    }
+  });
+  app.connect();
+  app.updateSession(session => {
+    session.voices["1"].sequence = ["0", "1", "2", "3", "4", "5", "6", "7"];
+    session.length = 8;
+    session.voices["1"].prohibitedPads = [];
+    session.voices["1"].randomize = false;
+    session.resetVersion++;
+  });
+  await app.settle();
+  assert.equal(app.steps.children[0].children[0].value, "0");
+  assert.equal(app.isPadForbidden("1"), false);
+  assert.equal(messages.at(-1).type, "yt-step-sequencer:prohibited");
 });
 
 Deno.test("locked steps persist and resist pad entry, randomize, clear, reset, and removal", async () => {
@@ -303,38 +480,43 @@ Deno.test("locked steps persist and resist pad entry, randomize, clear, reset, a
   app.reset();
   await app.settle();
   assert.equal(app.steps.children.length, 9);
+  assert.match(app.status.textContent, /unlock steps after step 8/);
   assert.equal(app.steps.children[0].children[0].value, "4");
-  assert.equal(app.steps.children[1].children[0].value, "1");
+  assert.equal(app.steps.children[1].children[0].value, "");
   assert.equal(app.steps.children[8].children[0].value, "9");
   app.lock(8);
   await app.settle();
   assert.equal(app.removeButton.disabled, false);
   assert.ok(app.storageSets.some(value => JSON.stringify(value.lockedSteps) === "[0]"));
-  app.remove();
+  app.reset();
   await app.settle();
   assert.equal(app.steps.children.length, 8);
+  assert.equal(app.steps.children[0].children[0].value, "4");
+  assert.equal(app.steps.children[1].children[0].value, "1");
+  assert.equal(app.status.classList.contains("error"), false);
 });
 
-Deno.test("reopening during playback uses the live sequence and locks instead of stale storage", async () => {
+Deno.test("reopening preserves the session voice rather than adopting an old player sequence", async () => {
   const messages = [];
+  let liveLocks = [1];
   const app = await setup({
     connected: true,
     saved: { sequence: ["0"], lockedSteps: [0] },
     sendMessage: async (_tab, message) => {
       messages.push(message);
+      if (message.type.endsWith(":locks")) liveLocks = message.lockedSteps;
       if (message.type.endsWith(":status")) {
         return {
-          ok: true, playing: true, sequence: ["0", "7"], lockedSteps: [1],
+          ok: true, playing: true, sequence: ["0", "7"], lockedSteps: liveLocks,
           bpm: 120, currentStep: 0, stepSerial: 1
         };
       }
       return { ok: true };
     }
   });
-  assert.equal(app.steps.children.length, 2);
-  assert.equal(app.steps.children[0].children[0].readOnly, false);
-  assert.equal(app.steps.children[1].children[0].readOnly, true);
-  assert.equal(messages.some(message => message.type.endsWith(":locks")), false);
+  assert.equal(app.steps.children.length, 1);
+  assert.equal(app.steps.children[0].children[0].readOnly, true);
+  assert.equal(messages.some(message => message.type.endsWith(":locks")), true);
 });
 
 Deno.test("lock synchronization failure restores the lock and keeps controls usable", async () => {
@@ -355,31 +537,49 @@ Deno.test("lock synchronization failure restores the lock and keeps controls usa
   assert.equal(app.steps.children.length, 9);
 });
 
-Deno.test("metronome checkbox follows tab state and reports failed changes", async () => {
+Deno.test("global metronome reports audio initialization failure", async () => {
   const messages = [];
   const app = await setup({
     sendMessage: async (_tab, message) => {
       messages.push(message);
       return message.enabled
-        ? { ok: true, metronomeEnabled: true }
-        : { ok: false, error: "audio error" };
+        ? { ok: false, error: "audio error" }
+        : { ok: true, metronomeEnabled: false };
     }
   });
+
   app.connect();
-  app.updateState({ playing: false, metronomeEnabled: true });
-  assert.equal(app.metronome.checked, true);
-  app.metronome.checked = false;
-  app.metronome.listeners.change();
-  await app.settle();
-  assert.equal(messages[0].type, "yt-step-sequencer:metronome");
-  assert.equal(messages[0].enabled, false);
-  assert.equal(app.metronome.checked, true);
-  assert.equal(app.status.textContent, "audio error");
+  app.updateState({ playing: false, metronomeEnabled: false });
   app.metronome.checked = true;
   app.metronome.listeners.change();
   await app.settle();
-  assert.equal(app.metronome.checked, true);
-  assert.equal(messages[1].enabled, true);
+  assert.equal(messages[0].type, "yt-step-sequencer:metronome");
+  assert.equal(messages[0].enabled, true);
+  assert.equal(app.metronome.checked, false);
+  assert.equal(app.status.textContent, "audio error");
+});
+
+Deno.test("metronome ownership transfers between assigned voices", async () => {
+  const messages = [];
+  const app = await setup({
+    sendMessage: async (_tab, message) => {
+      messages.push(message);
+      return { ok: true, playing: false };
+    }
+  });
+  app.connect();
+  app.updateSession(session => {
+    session.metronome = true;
+    session.voices["0"] = { tabId: 2 };
+  });
+  await app.settle();
+  assert.equal(messages.filter(message => message.type.endsWith(":metronome")).length, 0);
+  app.updateSession(session => { delete session.voices["0"]; });
+  await app.settle();
+  assert.equal(messages.at(-1).enabled, true);
+  app.updateSession(session => { session.voices["0"] = { tabId: 2 }; });
+  await app.settle();
+  assert.equal(messages.at(-1).enabled, false);
 });
 
 Deno.test("tap tempo sends rounded integer BPM while playing", async () => {

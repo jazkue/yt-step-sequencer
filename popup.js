@@ -26,6 +26,8 @@ const videoPlayback = document.querySelector("#video-playback");
 const link = document.querySelector("#link");
 const optionsToggle = document.querySelector("#options-toggle");
 const optionsMenu = document.querySelector("#options-menu");
+const addVideoButton = document.querySelector("#add-video");
+const videoMenu = document.querySelector("#video-menu");
 const flashTimers = new WeakMap();
 let tabId = null;
 let playing = false;
@@ -48,14 +50,241 @@ let defaultPadTimes = {};
 let recordedPadTimes = {};
 let recordedPadTimesByVideo = {};
 let tapTempoTimes = [];
+let chorusWindowId = null;
+let chorusSession = null;
+let chorusReady = false;
+let localEnginePlaying = false;
+let appliedClockVersion = -1;
+let appliedMetronome = false;
 const TAP_TEMPO_THRESHOLD = 2000;
+
+async function chorusCommand(command, data = {}) {
+  const response = await chrome.runtime.sendMessage({
+    type: `${prefix}chorus-${command}`, windowId: chorusWindowId, ...data
+  });
+  if (!response?.ok) throw new Error(response?.error || "could not update the chorus.");
+  return response.session;
+}
+
+function connectChorus() {
+  const port = chrome.runtime.connect({ name: `${prefix}chorus` });
+  port.onMessage.addListener(applyChorus);
+  port.onDisconnect.addListener(() => {
+    showStatus("chorus connection lost. reconnecting.", true);
+    setTimeout(async () => {
+      try {
+        connectChorus();
+        applyChorus(await chorusCommand("get"));
+      } catch (error) {
+        showStatus(error.message || "could not reconnect to the chorus.", true);
+      }
+    }, 1000);
+  });
+}
+
+async function saveVoice(changes) {
+  const { recordedPadTimesByVideo: times, ...voiceChanges } = changes;
+  const padTime = times && videoId ? { videoId, times: times[videoId] ?? null } : undefined;
+  await chorusCommand("voice", { changes: voiceChanges, ...(padTime && { padTime }) });
+}
+
+function applyChorus(session) {
+  const previous = chorusSession;
+  chorusSession = session;
+  if (!chorusReady) return;
+  const voice = session.voices[String(chorusWindowId)];
+  if (!voice) return;
+  const reset = (session.resetVersion || 0) !== (previous?.resetVersion || 0);
+  const times = normalizeRecordedPadTimesByVideo(session.recordedPadTimesByVideo);
+  const currentTimes = videoId ? { ...(times[videoId] || {}) } : {};
+  const timesChanged = JSON.stringify(currentTimes) !== JSON.stringify(recordedPadTimes);
+  recordedPadTimesByVideo = times;
+  if (timesChanged && videoId) {
+    recordedPadTimes = currentTimes;
+    updatePadLabels();
+    if (!reset && localEnginePlaying && tabId !== null) {
+      enqueue(async () => {
+        try {
+          await send("update", { recordedPadTimes: currentTimes });
+        } catch (error) {
+          showStatus(error.message || "could not update pad times.", true);
+        }
+      });
+    }
+  }
+  if (tabId !== null && voice.tabId === null) {
+    tabId = null;
+    videoId = null;
+    localEnginePlaying = false;
+    appliedMetronome = false;
+    videoTitle.textContent = "";
+    setUnavailable("choose a video with +.");
+  }
+  if (reset) {
+    setSequence(voice.sequence);
+    prohibitedPads = new Set(voice.prohibitedPads);
+    updateProhibitedPadControls();
+    setConnected(voice.randomize);
+    resizeWindow(false, false, true);
+    if (tabId !== null) {
+      enqueue(async () => {
+        try {
+          await send("prohibited", { prohibitedPads: voice.prohibitedPads });
+          if (localEnginePlaying) {
+            await send("update", { randomize: voice.randomize });
+            await send("update", { recordedPadTimes: currentTimes });
+            await send("update", { sequence: voice.sequence });
+          }
+        } catch (error) {
+          showStatus(error.message || "could not reset the voice.", true);
+        }
+      });
+    }
+  } else if (inputs.length !== session.length) {
+    const shrinking = inputs.length > session.length;
+    setSequence(voice.sequence);
+    resizeForSteps(shrinking);
+    if (localEnginePlaying && tabId !== null) {
+      enqueue(async () => {
+        try {
+          await send("update", { sequence: voice.sequence });
+        } catch (error) {
+          showStatus(error.message || "could not update the step count.", true);
+        }
+      });
+    }
+  }
+  if (!previous || previous.bpm !== session.bpm) bpmInput.value = String(session.bpm);
+  metronomeInput.checked = session.metronome;
+  playing = session.playing;
+  transport.classList.toggle("playing", playing);
+  transport.setAttribute("aria-label", playing ? "stop" : "play");
+  transport.title = playing ? "stop" : "play";
+  if (!playing) {
+    for (const label of steps.children) label.classList.remove("active");
+    updatePadIndicator(null);
+  }
+  const owner = Object.entries(session.voices).find(([, item]) => Number.isInteger(item.tabId));
+  const enableMetronome = session.metronome && owner?.[0] === String(chorusWindowId);
+  if (tabId !== null && enableMetronome !== appliedMetronome) {
+    appliedMetronome = enableMetronome;
+    enqueue(async () => {
+      try {
+        await send("metronome", { enabled: enableMetronome });
+      } catch (error) {
+        appliedMetronome = !enableMetronome;
+        if (enableMetronome || !chorusSession.metronome) {
+          await chorusCommand("metronome", { enabled: !enableMetronome });
+        }
+        showStatus(error.message || "could not change the metronome.", true);
+      }
+    });
+  }
+  if (tabId !== null && appliedClockVersion !== session.clockVersion) {
+    appliedClockVersion = session.clockVersion;
+    enqueue(async () => {
+      try {
+        if (session.clockVersion !== chorusSession.clockVersion || tabId === null) return;
+        let state;
+        if (!session.playing) {
+          if (!localEnginePlaying) return;
+          state = await send("stop");
+          localEnginePlaying = false;
+        } else if (localEnginePlaying) {
+          state = await send("sync-clock", { bpm: session.bpm, clock: session.clock });
+        } else {
+          state = await send("play", {
+            sequence: inputs.map(input => input.value), bpm: session.bpm, clock: session.clock,
+            randomize: connectBox.checked, prohibitedPads: [...prohibitedPads],
+            includeEmptySteps, recordedPadTimes: { ...recordedPadTimes }, lockedSteps: [...lockedSteps]
+          });
+          localEnginePlaying = true;
+        }
+        updateState(state);
+      } catch (error) {
+        localEnginePlaying = false;
+        showStatus(error.message || "could not synchronize the voice.", true);
+      }
+    });
+  }
+}
 
 function setOptionsOpen(open) {
   optionsMenu.hidden = !open;
   optionsToggle.setAttribute("aria-expanded", String(open));
 }
 
+function setVideoMenuOpen(open) {
+  videoMenu.hidden = !open;
+  addVideoButton.setAttribute("aria-expanded", String(open));
+}
+
+addVideoButton.addEventListener("click", async () => {
+  if (!videoMenu.hidden) {
+    setVideoMenuOpen(false);
+    return;
+  }
+  try {
+    const tabs = await chrome.tabs.query({ url: ["https://youtube.com/watch*", "https://www.youtube.com/watch*"] });
+    const used = new Set(Object.values(chorusSession?.voices || {}).map(voice => voice.tabId));
+    videoMenu.replaceChildren();
+    const choices = tabs.filter(tab => Number.isInteger(tab.id) && tab.url &&
+      new URL(tab.url).searchParams.has("v") && !used.has(tab.id));
+    if (!choices.length) {
+      const empty = document.createElement("p");
+      empty.textContent = "open another youtube video to add it.";
+      videoMenu.append(empty);
+    }
+    for (const tab of choices) {
+      const row = document.createElement("div");
+      row.className = "video-choice";
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = tab.title || tab.url;
+      button.addEventListener("click", async () => {
+        try {
+          if (tabId === null) {
+            location.search = `?tabId=${tab.id}`;
+          } else {
+            await chrome.windows.create({
+              url: `popup.html?tabId=${tab.id}`, type: "popup", width: 412, height: 460
+            });
+          }
+          setVideoMenuOpen(false);
+        } catch (error) {
+          showStatus(error.message || "could not open the video.", true);
+        }
+      });
+      row.append(button);
+      if (tabId !== null) {
+        const replace = document.createElement("button");
+        replace.type = "button";
+        replace.className = "video-replace";
+        replace.textContent = "bring here";
+        replace.setAttribute("aria-label", `bring ${tab.title || tab.url} here`);
+        replace.addEventListener("click", async () => {
+          try {
+            await send("stop");
+            if (appliedMetronome) await send("metronome", { enabled: false });
+            await chorusCommand("unassign");
+            location.search = `?tabId=${tab.id}`;
+          } catch (error) {
+            showStatus(error.message || "could not change the video.", true);
+          }
+        });
+        row.append(replace);
+      }
+      videoMenu.append(row);
+    }
+    setOptionsOpen(false);
+    setVideoMenuOpen(true);
+  } catch (error) {
+    showStatus(error.message || "could not list youtube tabs.", true);
+  }
+});
+
 optionsToggle.addEventListener("click", () => {
+  setVideoMenuOpen(false);
   setOptionsOpen(optionsMenu.hidden);
 });
 
@@ -64,6 +293,8 @@ document.addEventListener("pointerdown", event => {
       !optionsToggle.contains(event.target)) {
     setOptionsOpen(false);
   }
+  if (!videoMenu.hidden && !videoMenu.contains(event.target) &&
+      !addVideoButton.contains(event.target)) setVideoMenuOpen(false);
 });
 
 const inputs = [];
@@ -95,15 +326,16 @@ function appendStep(value) {
       return;
     }
     if (validStep(input.value)) {
-      if (playing) updateLive({ step: index, value: input.value });
+      if (playing && tabId !== null) updateLive({ step: index, value: input.value });
       else {
         status.classList.remove("error");
-        updateState({ playing: false, currentStep: -1 });
+        if (tabId !== null) updateState({ playing: false, currentStep: -1 });
+        else showGuidance();
         const sequence = inputs.map(item => item.value);
         if (sequence.every(validStep)) {
           enqueue(async () => {
             try {
-              await chrome.storage.local.set({ sequence });
+              await saveVoice({ sequence });
             } catch (error) {
               showStatus(error.message || "could not save the sequence.", true);
             }
@@ -177,7 +409,7 @@ function toggleStepLock(index) {
     try {
       if (tabId !== null) await send("locks", { lockedSteps: value });
       synchronized = true;
-      await chrome.storage.local.set({ lockedSteps: value });
+      await saveVoice({ lockedSteps: value });
     } catch (error) {
       if (!synchronized && lockedSteps.size === indices.size &&
           [...indices].every(step => lockedSteps.has(step))) {
@@ -361,24 +593,22 @@ function setConnected(value) {
 connectBox.addEventListener("change", () => {
   link.classList.toggle("connected", connectBox.checked);
   const randomize = connectBox.checked;
-  chrome.storage.local.set({ randomize });
-  if (playing) {
-    enqueue(async () => {
-      try {
-        await send("update", { randomize });
-      } catch (error) {
-        showStatus(error.message || "could not update the sequence.", true);
-      }
-    });
-  }
+  enqueue(async () => {
+    try {
+      await saveVoice({ randomize });
+      if (playing && tabId !== null) await send("update", { randomize });
+    } catch (error) {
+      showStatus(error.message || "could not update the sequence.", true);
+    }
+  });
 });
 
 includeEmptyStepsInput.addEventListener("change", () => {
   includeEmptySteps = includeEmptyStepsInput.checked;
   enqueue(async () => {
     try {
-      await chrome.storage.local.set({ includeEmptySteps });
-      if (playing) await send("update", { includeEmptySteps });
+      await saveVoice({ includeEmptySteps });
+      if (playing && tabId !== null) await send("update", { includeEmptySteps });
     } catch (error) {
       showStatus(error.message || "could not update randomization settings.", true);
     }
@@ -394,9 +624,9 @@ function recordPad(key) {
       recordedPadTimesByVideo[videoId] = { ...recordedPadTimes };
       updatePadLabels();
       const updates = [
-        chrome.storage.local.set({ recordedPadTimesByVideo })
+        saveVoice({ recordedPadTimesByVideo })
       ];
-      if (playing) {
+      if (playing && tabId !== null) {
         updates.push(send("update", { recordedPadTimes: { ...recordedPadTimes } }));
       }
       const results = await Promise.allSettled(updates);
@@ -415,8 +645,8 @@ function undoPad(key) {
       delete recordedPadTimes[key];
       recordedPadTimesByVideo[videoId] = { ...recordedPadTimes };
       updatePadLabels();
-      await chrome.storage.local.set({ recordedPadTimesByVideo });
-      if (playing) {
+      await saveVoice({ recordedPadTimesByVideo });
+      if (playing && tabId !== null) {
         await send("update", { recordedPadTimes: { ...recordedPadTimes } });
       }
     } catch (error) {
@@ -483,7 +713,7 @@ function stopScrubbing() {
       recordedPadTimes[key] = timecode;
       recordedPadTimesByVideo[videoId] = { ...recordedPadTimes };
       updatePadLabels();
-      await chrome.storage.local.set({ recordedPadTimesByVideo });
+      await saveVoice({ recordedPadTimesByVideo });
       if (playing) {
         await send("update", { recordedPadTimes: { ...recordedPadTimes } });
       }
@@ -518,7 +748,7 @@ function toggleProhibitedPad(key) {
   const value = [...prohibitedPads];
   enqueue(async () => {
     try {
-      const updates = [chrome.storage.local.set({ prohibitedPads: value })];
+      const updates = [saveVoice({ prohibitedPads: value })];
       if (tabId !== null) updates.push(send("prohibited", { prohibitedPads: value }));
       const results = await Promise.allSettled(updates);
       const failure = results.find(result => result.status === "rejected");
@@ -665,7 +895,7 @@ function advanceStep() {
   const completed = selectedStep === inputs.length - 1;
   selectStep(selectedStep === null ? 0 : (selectedStep + 1) % inputs.length);
   if (connectBox.checked) {
-    connectBox.checked = false;
+    setConnected(false);
   }
   if (completed && !playing && !transportPending && tabId !== null) {
     form.requestSubmit();
@@ -692,14 +922,11 @@ function replaceSequence(sequence) {
   enqueue(async () => {
     try {
       let state;
-      if (playing) {
+      if (playing && tabId !== null) {
         state = await send("update", { sequence });
-        await chrome.storage.local.set({
-          sequence: state.sequence,
-          bpm: state.bpm
-        });
+        await saveVoice({ sequence: state.sequence });
       } else {
-        await chrome.storage.local.set({ sequence });
+        await saveVoice({ sequence });
       }
       if (state) updateState(state);
       else if (!playing) showGuidance();
@@ -714,6 +941,7 @@ function resizeWindow(keepLeft = false, shrink = false, restoreSize = false) {
   enqueue(async () => {
     try {
       await fitWindow(keepLeft, shrink, restoreSize);
+      if (restoreSize) await fitWindow();
     } catch (error) {
       console.error("Could not resize the sequencer window:", error);
       showStatus(error.message || "could not resize the sequencer window.", true);
@@ -731,8 +959,13 @@ addStepButton.addEventListener("click", () => {
     showGuidance();
     return;
   }
-  replaceSequence([...sequence, ""]);
-  resizeForSteps();
+  enqueue(async () => {
+    try {
+      await chorusCommand("length", { length: chorusSession.length + 1 });
+    } catch (error) {
+      showStatus(error.message || "could not add a step.", true);
+    }
+  });
 });
 removeStepButton.addEventListener("click", () => {
   if (inputs.length === 1) return;
@@ -745,8 +978,13 @@ removeStepButton.addEventListener("click", () => {
     showGuidance();
     return;
   }
-  replaceSequence(sequence);
-  resizeForSteps(true);
+  enqueue(async () => {
+    try {
+      await chorusCommand("length", { length: chorusSession.length - 1 });
+    } catch (error) {
+      showStatus(error.message || "could not remove the step.", true);
+    }
+  });
 });
 
 randomizeButton.addEventListener("click", () => {
@@ -762,38 +1000,15 @@ clearButton.addEventListener("click", () =>
   replaceSequence(inputs.map((input, index) => lockedSteps.has(index) ? input.value : ""))
 );
 resetButton.addEventListener("click", () => {
-  recordedPadTimes = {};
-  if (videoId) delete recordedPadTimesByVideo[videoId];
-  updatePadLabels();
-  const resetTimes = {};
-  prohibitedPads.clear();
-  updateProhibitedPadControls();
-  const resetProhibitedPads = [];
-  const savedTimesByVideo = { ...recordedPadTimesByVideo };
-  connectBox.checked = false;
   enqueue(async () => {
     try {
-      const updates = [chrome.storage.local.set({
-        recordedPadTimesByVideo: savedTimesByVideo,
-        prohibitedPads: resetProhibitedPads
-      })];
-      if (tabId !== null) {
-        updates.push(send("prohibited", { prohibitedPads: resetProhibitedPads }));
-      }
-      if (playing) updates.push(send("update", { recordedPadTimes: resetTimes }));
-      const results = await Promise.allSettled(updates);
-      const failure = results.find(item => item.status === "rejected");
-      if (failure) throw failure.reason;
+      await chorusCommand("reset");
+      status.classList.remove("error");
+      showGuidance();
     } catch (error) {
-      showStatus(error.message || "could not reset pads.", true);
+      showStatus(error.message || "could not reset the voices.", true);
     }
   });
-  const defaults = defaultSequence();
-  const length = Math.max(defaults.length, ...[...lockedSteps].map(index => index + 1));
-  replaceSequence(Array.from({ length }, (_, index) =>
-    lockedSteps.has(index) ? inputs[index].value : (defaults[index] ?? "")
-  ));
-  resizeWindow(false, false, true);
 });
 
 function showStatus(text, error = false) {
@@ -806,6 +1021,8 @@ function showGuidance() {
     showStatus("steps must be empty or a digit from 0 to 9.", true);
   } else if (!validBpmInput()) {
     showStatus("enter a whole-number bpm from 1 to 999.", true);
+  } else if (tabId === null && chorusReady) {
+    showStatus("choose a video with +.");
   } else if (!padMode.checked) {
     showStatus("rec mode. press a pad to save the current video time.");
   } else if (selectedStep !== null && lockedSteps.has(selectedStep)) {
@@ -818,7 +1035,8 @@ function showGuidance() {
 }
 
 function updateState(state, hydrate = false) {
-  playing = state.playing;
+  localEnginePlaying = state.playing;
+  playing = chorusSession ? chorusSession.playing : state.playing;
   if ("videoPaused" in state) updateVideoPlayback(state.videoPaused);
   if (Array.isArray(state.lockedSteps)) setLockedSteps(state.lockedSteps);
   settings.disabled = false;
@@ -859,7 +1077,7 @@ function updateState(state, hydrate = false) {
     prohibitedPads = new Set(state.prohibitedPads);
     updateProhibitedPadControls();
   }
-  if (typeof state.metronomeEnabled === "boolean") {
+  if (typeof state.metronomeEnabled === "boolean" && !chorusSession) {
     metronomeInput.checked = state.metronomeEnabled;
   }
   transport.disabled = transportPending;
@@ -874,7 +1092,7 @@ function updateState(state, hydrate = false) {
     updateStepIndicator(state);
   }
   if (playing && hydrate) {
-    bpmInput.value = String(state.bpm);
+    bpmInput.value = String(chorusSession?.bpm ?? state.bpm);
     setConnected(state.randomizeOnStart === true);
   }
   markBpmValidity();
@@ -900,7 +1118,13 @@ function updateStepIndicator(state) {
   lastStepSerial = state.stepSerial;
   if (state.randomized && Array.isArray(state.sequence) && state.sequence.length === inputs.length) {
     inputs.forEach((input, index) => { input.value = state.sequence[index]; });
-    chrome.storage.local.set({ sequence: state.sequence });
+    enqueue(async () => {
+      try {
+        await saveVoice({ sequence: state.sequence });
+      } catch (error) {
+        showStatus(error.message || "could not save the randomized sequence.", true);
+      }
+    });
     flash(randomizeButton);
   }
   for (const [index, label] of [...steps.children].entries()) {
@@ -912,12 +1136,12 @@ function updateStepIndicator(state) {
 }
 
 function setUnavailable(message) {
-  settings.disabled = true;
-  bpmInput.disabled = true;
-  bpmDecrease.disabled = true;
-  bpmIncrease.disabled = true;
-  tapTempoButton.disabled = true;
-  metronomeInput.disabled = true;
+  settings.disabled = !chorusReady;
+  bpmInput.disabled = !chorusReady;
+  bpmDecrease.disabled = !chorusReady;
+  bpmIncrease.disabled = !chorusReady;
+  tapTempoButton.disabled = !chorusReady;
+  metronomeInput.disabled = !chorusReady;
   padMode.disabled = true;
   for (const button of padButtons.values()) {
     button.disabled = true;
@@ -927,9 +1151,9 @@ function setUnavailable(message) {
   for (const button of recordButtons.values()) button.disabled = true;
   for (const button of scrubberButtons.values()) button.disabled = true;
   for (const button of undoButtons.values()) button.disabled = true;
-  optionsToggle.disabled = true;
-  includeEmptyStepsInput.disabled = true;
-  transport.disabled = true;
+  optionsToggle.disabled = !chorusReady;
+  includeEmptyStepsInput.disabled = !chorusReady;
+  transport.disabled = !chorusReady;
   videoPlayback.disabled = true;
   showStatus(message, true);
 }
@@ -960,11 +1184,17 @@ async function refresh(hydrate = false) {
   const version = commandVersion;
   try {
     const state = await send("status");
-    if (!commandPending && version === commandVersion) updateState(state, hydrate);
+    if (!commandPending && version === commandVersion) {
+      if (state.videoId !== videoId) {
+        await chorusCommand("unassign");
+        return;
+      }
+      updateState(state, hydrate);
+    }
   } catch (error) {
     if (!commandPending && version === commandVersion) {
-      tabId = null;
-      setUnavailable(error.message || "could not connect. open or reload a youtube video.");
+      await chorusCommand("unassign");
+      showStatus(error.message || "could not connect to the video. choose another with +.", true);
     }
   } finally {
     polling = false;
@@ -980,6 +1210,9 @@ function enqueue(command) {
     } finally {
       commandPending = false;
     }
+  }).catch(error => {
+    console.error("Could not run sequencer command:", error);
+    showStatus(error.message || "could not run the sequencer command.", true);
   });
   return commandQueue;
 }
@@ -1009,10 +1242,7 @@ function updateLive(data) {
     if (!playing) return;
     try {
       const state = await send("update", data);
-      await chrome.storage.local.set({
-        sequence: state.sequence,
-        bpm: state.bpm
-      });
+      await saveVoice({ sequence: state.sequence });
       status.classList.remove("error");
       updateState(state);
     } catch (error) {
@@ -1068,7 +1298,17 @@ function applyBpm() {
   if (bpmTimer === null) return;
   clearTimeout(bpmTimer);
   bpmTimer = null;
-  if (validBpmInput() && playing) updateLive({ bpm: Number(bpmInput.value) });
+  if (validBpmInput()) setChorusBpm(Number(bpmInput.value));
+}
+
+function setChorusBpm(bpm) {
+  enqueue(async () => {
+    try {
+      await chorusCommand("bpm", { bpm });
+    } catch (error) {
+      showStatus(error.message || "could not change the bpm.", true);
+    }
+  });
 }
 
 bpmInput.addEventListener("input", () => {
@@ -1079,11 +1319,7 @@ bpmInput.addEventListener("input", () => {
     return;
   }
   showGuidance();
-  if (playing) {
-    bpmTimer = setTimeout(applyBpm, 300);
-  } else {
-    updateState({ playing: false, currentStep: -1 });
-  }
+  bpmTimer = setTimeout(applyBpm, 300);
 });
 bpmInput.addEventListener("change", applyBpm);
 
@@ -1112,12 +1348,7 @@ function adjustBpm(amount) {
   clearTimeout(bpmTimer);
   bpmTimer = null;
   bpmInput.value = String(bpm);
-  if (playing) {
-    updateLive({ bpm });
-  } else {
-    status.classList.remove("error");
-    updateState({ playing: false, currentStep: -1 });
-  }
+  setChorusBpm(bpm);
 }
 
 function handleTapTempo() {
@@ -1142,11 +1373,7 @@ function handleTapTempo() {
     markBpmValidity();
     status.classList.remove("error");
     showGuidance();
-    if (playing) {
-      updateLive({ bpm });
-    } else {
-      updateState({ playing: false, currentStep: -1 });
-    }
+    setChorusBpm(bpm);
   }
 }
 
@@ -1158,13 +1385,12 @@ metronomeInput.addEventListener("change", () => {
   metronomeInput.disabled = true;
   enqueue(async () => {
     try {
-      const state = await send("metronome", { enabled });
-      metronomeInput.checked = state.metronomeEnabled;
+      await chorusCommand("metronome", { enabled });
     } catch (error) {
       metronomeInput.checked = !enabled;
       showStatus(error.message || "could not change the metronome.", true);
     } finally {
-      if (tabId !== null) metronomeInput.disabled = false;
+      metronomeInput.disabled = false;
     }
   });
 });
@@ -1172,72 +1398,33 @@ metronomeInput.addEventListener("change", () => {
 form.addEventListener("submit", async event => {
   event.preventDefault();
   if (transportPending) return;
-  if (playing) {
-    if (bpmTimer !== null) applyBpm();
-    transportPending = true;
-    transport.disabled = true;
-    await enqueue(async () => {
-      try {
-        const state = await send("stop");
-        status.classList.remove("error");
-        updateState(state);
-      } catch (error) {
-        showStatus(error.message || "could not stop the sequence.", true);
-      } finally {
-        transportPending = false;
-        transport.disabled = false;
-      }
-    });
-    return;
-  }
   const sequence = inputs.map(input => input.value);
   const bpm = Number(bpmInput.value);
   const validSteps = sequence.every(validStep);
   const validBpm = markBpmValidity();
-  if (!validSteps || !validBpm) {
+  if (!playing && (!validSteps || !validBpm)) {
     showGuidance();
     if (!validBpm) bpmInput.focus();
     return;
   }
   transportPending = true;
   transport.disabled = true;
-  settings.disabled = true;
-  optionsToggle.disabled = true;
-  includeEmptyStepsInput.disabled = true;
-  for (const button of recordButtons.values()) button.disabled = true;
-  for (const button of scrubberButtons.values()) button.disabled = true;
-  for (const button of undoButtons.values()) button.disabled = true;
-  bpmInput.disabled = true;
-  bpmDecrease.disabled = true;
-  bpmIncrease.disabled = true;
+  if (bpmTimer !== null) applyBpm();
+  const start = !playing;
   await enqueue(async () => {
     try {
-      await chrome.storage.local.set({ sequence, bpm });
-      const state = await send("play", {
-        sequence, bpm, randomize: connectBox.checked, prohibitedPads: [...prohibitedPads],
-        includeEmptySteps, recordedPadTimes: { ...recordedPadTimes }, lockedSteps: [...lockedSteps]
-      });
+      if (start) {
+        await saveVoice({ sequence, randomize: connectBox.checked, prohibitedPads: [...prohibitedPads],
+          includeEmptySteps, recordedPadTimesByVideo, lockedSteps: [...lockedSteps] });
+        await chorusCommand("bpm", { bpm });
+      }
+      await chorusCommand("transport", { playing: start });
       status.classList.remove("error");
-      updateState(state);
     } catch (error) {
-      settings.disabled = false;
-      optionsToggle.disabled = false;
-      includeEmptyStepsInput.disabled = false;
-      for (const button of recordButtons.values()) button.disabled = false;
-      for (const button of scrubberButtons.values()) button.disabled = false;
-      for (const button of undoButtons.values()) button.disabled = false;
-      bpmInput.disabled = false;
-      bpmDecrease.disabled = false;
-      bpmIncrease.disabled = false;
-      showStatus(error.message || "could not start the sequence.", true);
+      showStatus(error.message || "could not change playback.", true);
     } finally {
       transportPending = false;
       transport.disabled = false;
-      optionsToggle.disabled = false;
-      includeEmptyStepsInput.disabled = false;
-      for (const button of recordButtons.values()) button.disabled = false;
-      for (const button of scrubberButtons.values()) button.disabled = false;
-      for (const button of undoButtons.values()) button.disabled = false;
     }
   });
 });
@@ -1245,17 +1432,36 @@ form.addEventListener("submit", async event => {
 async function initialize() {
   setUnavailable("connecting to youtube...");
   try {
-    const saved = await chrome.storage.local.get([
-      "sequence", "bpm", "randomize", "prohibitedPads", "includeEmptySteps",
-      "recordedPadTimesByVideo", "lockedSteps"
-    ]);
+    const currentWindow = await chrome.windows.getCurrent();
+    if (!Number.isInteger(currentWindow.id)) throw new Error("could not identify the sequencer window.");
+    chorusWindowId = currentWindow.id;
+    connectChorus();
+    const target = new URLSearchParams(location.search).get("tabId");
+    let tab = null;
+    if (target && /^\d+$/.test(target) && Number.isSafeInteger(Number(target))) {
+      try {
+        tab = await chrome.tabs.get(Number(target));
+      } catch (error) {
+        console.warn("The video tab is unavailable:", error);
+      }
+    }
+    const url = tab?.url ? new URL(tab.url) : null;
+    if (tab && url?.protocol === "https:" &&
+        ["youtube.com", "www.youtube.com"].includes(url.hostname) &&
+        url.pathname === "/watch" && url.searchParams.get("v")) {
+      tabId = tab.id;
+      videoId = url.searchParams.get("v");
+    }
+    const session = await chorusCommand("register", { tabId, videoId });
+    chorusSession = session;
+    const saved = session.voices[String(chorusWindowId)];
     setConnected(saved.randomize === true);
     includeEmptySteps = saved.includeEmptySteps !== false;
     includeEmptyStepsInput.checked = includeEmptySteps;
     prohibitedPads = new Set(Array.isArray(saved.prohibitedPads)
       ? saved.prohibitedPads.filter(key => typeof key === "string" && /^[0-9]$/.test(key))
       : []);
-    recordedPadTimesByVideo = normalizeRecordedPadTimesByVideo(saved.recordedPadTimesByVideo);
+    recordedPadTimesByVideo = normalizeRecordedPadTimesByVideo(session.recordedPadTimesByVideo);
     updateProhibitedPadControls();
     if (Array.isArray(saved.sequence) && saved.sequence.length > 0 &&
         saved.sequence.every(validStep)) {
@@ -1266,51 +1472,31 @@ async function initialize() {
         Number.isSafeInteger(index) && index >= 0
       ));
     }
-    if (Number.isInteger(saved.bpm) && saved.bpm >= 1 && saved.bpm <= 999) {
-      bpmInput.value = String(saved.bpm);
-    }
-    const target = new URLSearchParams(location.search).get("tabId");
-    if (!target || !/^\d+$/.test(target) || !Number.isSafeInteger(Number(target))) {
-      setUnavailable("open the sequencer from a youtube video tab.");
+    bpmInput.value = String(session.bpm);
+    chorusReady = true;
+    if (tabId === null) {
+      setUnavailable("choose a video with +.");
+      applyChorus(chorusSession);
       return;
     }
-    let tab;
-    try {
-      tab = await chrome.tabs.get(Number(target));
-    } catch {
-      setUnavailable("the original video tab is no longer available.");
-      return;
-    }
-    const url = tab?.url ? new URL(tab.url) : null;
-    if (!tab?.id || !url || url.protocol !== "https:" ||
-        !["youtube.com", "www.youtube.com"].includes(url.hostname) ||
-        url.pathname !== "/watch" || !url.searchParams.get("v")) {
-      setUnavailable("open the sequencer from a youtube video tab.");
-      return;
-    }
-    tabId = tab.id;
-    videoId = url.searchParams.get("v");
     recordedPadTimes = { ...(recordedPadTimesByVideo[videoId] || {}) };
     updatePadLabels();
     videoTitle.textContent = (tab.title || "").replace(/^\(\d+\)\s*/, "").replace(/ - youtube$/i, "").toLowerCase();
     videoTitle.title = videoTitle.textContent;
     await send("prohibited", { prohibitedPads: [...prohibitedPads] });
     const initialState = await send("status");
-    if (initialState.playing && Array.isArray(initialState.sequence) &&
-        initialState.sequence.length > 0 && initialState.sequence.every(validStep) &&
-        Array.isArray(initialState.lockedSteps)) {
-      setSequence(initialState.sequence);
-      setLockedSteps(initialState.lockedSteps);
-    } else {
-      setLockedSteps([...lockedSteps].filter(index => index < inputs.length));
-      await send("locks", { lockedSteps: [...lockedSteps] });
-    }
+    if (initialState.videoId !== videoId) throw new Error("the selected video changed. choose a video with +.");
+    if (initialState.playing) await send("stop");
+    if (initialState.metronomeEnabled) await send("metronome", { enabled: false });
+    await send("locks", { lockedSteps: [...lockedSteps] });
     const port = chrome.tabs.connect(tabId, { name: `${prefix}steps` });
     port.onMessage.addListener(message => {
       if (tabId === null) return;
       if ("videoPaused" in message) updateVideoPlayback(message.videoPaused);
       if (Array.isArray(message.lockedSteps)) setLockedSteps(message.lockedSteps);
       if (message.metronomeError) {
+        chorusCommand("metronome", { enabled: false }).catch(error =>
+          showStatus(error.message || "could not update the metronome.", true));
         if (typeof message.playing === "boolean") updateState(message);
         else metronomeInput.checked = false;
         showStatus(message.metronomeError, true);
@@ -1322,16 +1508,24 @@ async function initialize() {
     });
     port.onDisconnect.addListener(() => {
       if (tabId !== null) {
-        tabId = null;
-        setUnavailable("connection lost. reopen the sequencer from the youtube tab.");
+        chorusCommand("unassign").catch(error =>
+          showStatus(error.message || "could not disconnect the video.", true));
       }
     });
     await refresh(true);
+    applyChorus(chorusSession);
     setInterval(() => {
       refresh();
     }, 1000);
-  } catch {
-    setUnavailable("could not start the extension. try reopening it.");
+  } catch (error) {
+    if (chorusReady && tabId !== null) {
+      try {
+        await chorusCommand("unassign");
+      } catch (disconnectError) {
+        console.error("Could not disconnect the video:", disconnectError);
+      }
+    }
+    setUnavailable(error.message || "could not start the extension. try reopening it.");
   } finally {
     try {
       await fitWindow();

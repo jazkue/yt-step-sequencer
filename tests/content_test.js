@@ -212,6 +212,45 @@ Deno.test("manual pads leave the playing sequence unchanged and pad times can st
   assert.ok(observer.updates.every(update => !("recordedStep" in update)));
 });
 
+Deno.test("shared clock aligns voices and joins at the next beat without accumulating delay", () => {
+  const first = setup();
+  const second = setup();
+  const clock = { startAt: 1000200, step: 0 };
+  first.send("play", { sequence: ["1", "2", "3"], bpm: 120, clock });
+  second.advance(300);
+  second.send("play", { sequence: ["4", "5", "6"], bpm: 120, clock });
+  first.advance(200);
+  assert.equal(first.video.currentTime, 10);
+  assert.equal(second.video.currentTime, 0);
+  first.advance(700);
+  second.advance(700);
+  assert.equal(first.send("status").currentStep, 1);
+  assert.equal(second.send("status").currentStep, 1);
+  assert.equal(second.video.currentTime, 50);
+  first.advance(1800);
+  second.advance(1800);
+  assert.equal(first.send("status").currentStep, 0);
+  assert.equal(second.send("status").currentStep, 0);
+  first.advance(2200);
+  second.advance(2200);
+  assert.equal(first.send("status").currentStep, 1);
+  assert.equal(second.send("status").currentStep, 1);
+});
+
+Deno.test("shared tempo changes take effect at the same future beat", () => {
+  const app = setup();
+  app.send("play", { sequence: ["1", "2", "3"], bpm: 120, clock: { startAt: 1000200, step: 0 } });
+  app.advance(200);
+  assert.equal(app.send("sync-clock", { bpm: 60, clock: { startAt: 1001200, step: 2 } }).ok, true);
+  app.advance(700);
+  assert.equal(app.send("status").currentStep, 1);
+  app.advance(1200);
+  assert.equal(app.send("status").currentStep, 2);
+  assert.equal(app.send("status").bpm, 60);
+  app.advance(2200);
+  assert.equal(app.send("status").currentStep, 0);
+});
+
 Deno.test("video control pauses independently of the sequencer and a pad resumes it", async () => {
   const app = setup();
   const observer = app.connect();

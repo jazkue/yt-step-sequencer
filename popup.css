@@ -39,7 +39,42 @@ h1 {
   width: 332px;
   margin-bottom: 8px;
 }
-.options { position: relative; }
+.options { position: relative; display: flex; gap: 5px; }
+#add-video {
+  width: 28px;
+  height: 28px;
+  background: var(--surface);
+}
+#add-video svg { width: 12px; height: 12px; }
+#video-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 33px;
+  z-index: 3;
+  width: 250px;
+  max-height: 220px;
+  overflow: auto;
+  padding: 5px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+#video-menu button {
+  display: block;
+  width: 100%;
+  height: auto;
+  padding: 6px;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+}
+#video-menu button:hover:not(:disabled) { background: var(--input); }
+#video-menu .video-choice { display: flex; align-items: center; }
+#video-menu .video-choice > button:first-child { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+#video-menu .video-replace { width: auto; flex: none; color: var(--muted); }
+#video-menu p { margin: 4px; font-size: 11px; }
 #options-toggle {
   width: 28px;
   height: 28px;
