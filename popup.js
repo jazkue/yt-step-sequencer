@@ -577,6 +577,13 @@ async function triggerPad(key, timeStamp) {
 
 document.addEventListener("keydown", event => {
   if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+  if (event.key === " " && !event.target?.closest?.(
+    'button, input, select, textarea, a[href], [contenteditable]:not([contenteditable="false"])'
+  )) {
+    event.preventDefault();
+    if (!event.repeat) toggleVideoPlayback();
+    return;
+  }
   if ((event.key === "ArrowLeft" || event.key === "ArrowRight") &&
       tabId !== null && event.target !== bpmInput && !inputs.includes(event.target) &&
       !optionsMenu.contains(event.target) && event.target !== optionsToggle &&
@@ -1001,7 +1008,7 @@ function enqueue(command) {
   return commandQueue;
 }
 
-videoPlayback.addEventListener("click", () => {
+function toggleVideoPlayback() {
   if (videoPlayback.disabled || tabId === null) return;
   videoPlaybackPending = true;
   videoPlayback.disabled = true;
@@ -1017,7 +1024,9 @@ videoPlayback.addEventListener("click", () => {
       if (tabId !== null) videoPlayback.disabled = !videoAvailable;
     }
   });
-});
+}
+
+videoPlayback.addEventListener("click", toggleVideoPlayback);
 
 function updateLive(data) {
   enqueue(async () => {

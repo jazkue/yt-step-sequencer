@@ -472,6 +472,52 @@ Deno.test("arrow-key seek failures are reported", async () => {
   assert.equal(app.status.textContent, "seek unavailable");
 });
 
+Deno.test("space toggles video playback without repeating or interrupting focused controls", async () => {
+  const messages = [];
+  let paused = true;
+  const app = await setup({
+    sendMessage: async (_tab, message) => {
+      messages.push(message);
+      paused = !paused;
+      return { ok: true, playing: false, videoPaused: paused };
+    }
+  });
+  app.connect();
+  app.updateState({ playing: false, videoPaused: true });
+  assert.equal(app.pressKey(" "), true);
+  assert.equal(app.pressKey(" ", 0, { repeat: true }), true);
+  await app.settle();
+  assert.equal(app.videoPlayback.attributes["aria-label"], "pause video");
+  assert.equal(app.pressKey(" "), true);
+  await app.settle();
+  assert.equal(app.videoPlayback.attributes["aria-label"], "play video");
+  assert.equal(app.pressKey(" ", 0, { target: { closest: () => ({}) } }), false);
+  assert.equal(app.pressKey(" ", 0, { ctrlKey: true }), false);
+  assert.deepEqual(messages.map(message => message.type), [
+    "yt-step-sequencer:video-toggle", "yt-step-sequencer:video-toggle"
+  ]);
+});
+
+Deno.test("space uses video playback availability and error handling", async () => {
+  const messages = [];
+  const app = await setup({
+    sendMessage: async (_tab, message) => {
+      messages.push(message);
+      return { ok: false, error: "video blocked" };
+    }
+  });
+  app.connect();
+  app.updateState({ playing: false, videoPaused: null });
+  app.pressKey(" ");
+  await app.settle();
+  assert.equal(messages.length, 0);
+  app.updateState({ playing: false, videoPaused: true });
+  app.pressKey(" ");
+  await app.settle();
+  assert.equal(app.status.textContent, "video blocked");
+  assert.equal(app.videoPlayback.disabled, false);
+});
+
 Deno.test("assigning pads advances the selected step with mouse and keyboard", async () => {
   const messages = [];
   const app = await setup({

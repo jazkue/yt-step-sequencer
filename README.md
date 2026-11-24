@@ -11,7 +11,7 @@
 ## use
 
 - Set steps to digits `0–9` or leave them empty to continue playback without a jump. Use **+** and the trash icon after the last step to add or remove steps (at least one remains). The window fits the saved sequence when opened, grows to the right as steps are added, and shrinks when they are removed, up to the display edge and down to its minimum size; scroll the step row to reach steps that don't fit. Set the bpm to a whole number from 1 to 999 and press play.
-- Use the play/pause icon next to the video title to control YouTube playback independently of the sequencer. Playing a pad resumes the video.
+- Use the play/pause icon next to the video title, or press Space when a control or text field is not focused, to control YouTube playback independently of the sequencer. Playing a pad resumes the video.
 - Use the left and right arrow keys to seek the video by five seconds, except while editing a step or bpm.
 - Toggle the metronome next to **tap** to hear a high beat at the start of each sequence and a lower beat on every other step, including empty steps. It keeps playing with the sequence when the sequencer window is closed.
 - Press **record** next to play to clear unlocked steps, pause the video, and start recording with the metronome. Playing a pad starts the video and records it on the nearest audible metronome beat unless that step is locked, allowing up to half a beat of timing tolerance; later presses on the same step replace it, including on subsequent loops. Press record again to stop recording and the metronome while the sequence continues playing.
