@@ -229,6 +229,33 @@ Deno.test("reset expands short sequences to eight steps", async () => {
   assert.equal(session.voices["2"].sequence.join(","), "0,1,2,3,4,5,6,7");
 });
 
+Deno.test("pad locks protect shared video times from edits and global reset", async () => {
+  const app = setup({ sourceWindow: {}, displays: [] });
+  await app.send("register", { windowId: 1, tabId: 11, videoId: "a" });
+  await app.send("register", { windowId: 2, tabId: 12, videoId: "a" });
+  await app.send("voice", {
+    windowId: 1, changes: {}, padTime: { videoId: "a", times: { "1": 10, "2": 20 } }
+  });
+  await app.send("pad-lock", { windowId: 1, videoId: "a", key: "1", locked: true });
+  await app.send("pad-lock", { windowId: 2, videoId: "a", key: "3", locked: true });
+  for (const times of [{ "1": 11, "2": 20 }, { "2": 20 }, { "1": 10, "3": 30 }, null]) {
+    const result = await app.send("voice", { windowId: 2, changes: {}, padTime: { videoId: "a", times } });
+    assert.equal(result.ok, false);
+  }
+  const edit = await app.send("voice", {
+    windowId: 2, changes: {}, padTime: { videoId: "a", times: { "1": 10, "2": 21 } }
+  });
+  assert.equal(edit.ok, true);
+  const reset = await app.send("reset", { windowId: 2 });
+  assert.equal(JSON.stringify(reset.session.recordedPadTimesByVideo.a), '{"1":10}');
+  assert.equal(reset.session.lockedPadsByVideo.a.join(","), "1,3");
+  await app.send("pad-lock", { windowId: 2, videoId: "a", key: "1", locked: false });
+  const unlocked = await app.send("voice", {
+    windowId: 1, changes: {}, padTime: { videoId: "a", times: { "1": 15 } }
+  });
+  assert.equal(unlocked.session.recordedPadTimesByVideo.a["1"], 15);
+});
+
 Deno.test("closing the last voice stops playback and clears session settings", async () => {
   const app = setup({ sourceWindow: {}, displays: [] });
   await app.send("register", { windowId: 1, tabId: 11, videoId: "a" });

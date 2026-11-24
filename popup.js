@@ -43,6 +43,7 @@ let selectedStep = null;
 let lastStepSerial = -1;
 let prohibitedPads = new Set();
 let lockedSteps = new Set();
+let lockedPads = new Set();
 let includeEmptySteps = true;
 let videoId = null;
 let videoDuration = null;
@@ -85,7 +86,7 @@ function connectChorus() {
 async function saveVoice(changes) {
   const { recordedPadTimesByVideo: times, ...voiceChanges } = changes;
   const padTime = times && videoId ? { videoId, times: times[videoId] ?? null } : undefined;
-  await chorusCommand("voice", { changes: voiceChanges, ...(padTime && { padTime }) });
+  return chorusCommand("voice", { changes: voiceChanges, ...(padTime && { padTime }) });
 }
 
 function applyChorus(session) {
@@ -120,6 +121,7 @@ function applyChorus(session) {
     videoTitle.textContent = "";
     setUnavailable("choose a video with +.");
   }
+  syncPadLocks(session);
   if (reset) {
     setSequence(voice.sequence);
     prohibitedPads = new Set(voice.prohibitedPads);
@@ -432,6 +434,7 @@ const prohibitedButtons = new Map();
 const recordButtons = new Map();
 const scrubberButtons = new Map();
 const undoButtons = new Map();
+const padLockButtons = new Map();
 const padTimers = new Map();
 let activeScrubber = null;
 let scrubStartX = 0;
@@ -488,7 +491,12 @@ for (const key of "1234567890") {
   undo.disabled = true;
   undo.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 18 A6 6 0 0 0 12 6 L12 3 L9 6 L12 9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>';
   undo.addEventListener("click", () => undoPad(key));
-  pad.append(button, prohibited, record, scrubber, undo);
+  const lock = document.createElement("button");
+  lock.type = "button";
+  lock.className = "pad-lock";
+  lock.disabled = true;
+  lock.addEventListener("click", () => togglePadLock(key));
+  pad.append(button, prohibited, record, scrubber, undo, lock);
   pads.append(pad);
   padButtons.set(key, button);
   padContainers.set(key, pad);
@@ -496,6 +504,49 @@ for (const key of "1234567890") {
   recordButtons.set(key, record);
   scrubberButtons.set(key, scrubber);
   undoButtons.set(key, undo);
+  padLockButtons.set(key, lock);
+}
+
+function updatePadLockControls() {
+  for (const [key, button] of padLockButtons) {
+    const locked = lockedPads.has(key);
+    button.disabled = padButtons.get(key).disabled;
+    button.setAttribute("aria-pressed", String(locked));
+    button.setAttribute("aria-label", `${locked ? "unlock" : "lock"} pad ${key}`);
+    button.title = `${locked ? "unlock" : "lock"} pad ${key}`;
+    button.innerHTML = locked
+      ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7a5 5 0 0 1 10 0v3h1a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2zm2 0h6V7a3 3 0 0 0-6 0z"></path></svg>'
+      : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7a5 5 0 0 1 9.5-2.2l-1.8.9A3 3 0 0 0 9 7v3h9a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2z"></path></svg>';
+    padContainers.get(key).classList.toggle("pad-locked", locked);
+    for (const controls of [recordButtons, scrubberButtons, undoButtons]) {
+      controls.get(key).disabled = button.disabled || locked;
+    }
+    if (locked) padButtons.get(key).classList.remove("record-pressed");
+  }
+}
+
+function syncPadLocks(session) {
+  lockedPads = new Set(videoId ? session.lockedPadsByVideo?.[videoId] || [] : []);
+  if (activeScrubber && (activeScrubber.videoId !== videoId || lockedPads.has(activeScrubber.key))) {
+    const changedVideo = activeScrubber.videoId !== videoId;
+    cancelScrubbing();
+    updatePadLabels();
+    showStatus(changedVideo ? "the video has changed." : "pad locked. unlock to change its time.", true);
+  }
+  updatePadLockControls();
+}
+
+function togglePadLock(key) {
+  if (padLockButtons.get(key)?.disabled) return;
+  enqueue(async () => {
+    try {
+      await chorusCommand("pad-lock", { videoId, key, locked: !lockedPads.has(key) });
+      status.classList.remove("error");
+      showGuidance();
+    } catch (error) {
+      showStatus(error.message || "could not change the pad lock.", true);
+    }
+  });
 }
 
 function flash(button) {
@@ -567,6 +618,7 @@ function updatePadLabels() {
 padMode.addEventListener("change", () => {
   padMode.setAttribute("aria-label", `pad mode: ${padMode.checked ? "play" : "rec"}`);
   for (const button of recordButtons.values()) button.hidden = !padMode.checked;
+  for (const button of padButtons.values()) button.classList.remove("record-pressed");
   updatePadLabels();
   if (!status.classList.contains("error")) showGuidance();
 });
@@ -615,23 +667,28 @@ includeEmptyStepsInput.addEventListener("change", () => {
   });
 });
 
+async function savePadTimes(times) {
+  const previous = chorusSession;
+  const session = await saveVoice({
+    recordedPadTimesByVideo: { ...recordedPadTimesByVideo, [videoId]: times }
+  });
+  if (chorusSession === previous) applyChorus(session);
+}
+
 function recordPad(key) {
+  if (lockedPads.has(key)) {
+    showStatus("pad locked. unlock to change its time.", true);
+    return;
+  }
   if (!videoId || recordButtons.get(key)?.disabled) return;
   enqueue(async () => {
     try {
+      if (lockedPads.has(key)) throw new Error("Pad locked. Unlock to change its time.");
+      const currentVideo = videoId;
       const result = await send("record", { key });
-      recordedPadTimes[key] = result.timecode;
-      recordedPadTimesByVideo[videoId] = { ...recordedPadTimes };
-      updatePadLabels();
-      const updates = [
-        saveVoice({ recordedPadTimesByVideo })
-      ];
-      if (playing && tabId !== null) {
-        updates.push(send("update", { recordedPadTimes: { ...recordedPadTimes } }));
-      }
-      const results = await Promise.allSettled(updates);
-      const failure = results.find(item => item.status === "rejected");
-      if (failure) throw failure.reason;
+      if (videoId !== currentVideo) throw new Error("The video has changed.");
+      const times = { ...recordedPadTimes, [key]: result.timecode };
+      await savePadTimes(times);
     } catch (error) {
       showStatus(error.message || "could not record the video time.", true);
     }
@@ -642,13 +699,10 @@ function undoPad(key) {
   if (!videoId || undoButtons.get(key)?.disabled) return;
   enqueue(async () => {
     try {
-      delete recordedPadTimes[key];
-      recordedPadTimesByVideo[videoId] = { ...recordedPadTimes };
-      updatePadLabels();
-      await saveVoice({ recordedPadTimesByVideo });
-      if (playing && tabId !== null) {
-        await send("update", { recordedPadTimes: { ...recordedPadTimes } });
-      }
+      if (lockedPads.has(key)) throw new Error("Pad locked. Unlock to change its time.");
+      const times = { ...recordedPadTimes };
+      delete times[key];
+      await savePadTimes(times);
     } catch (error) {
       showStatus(error.message || "could not reset the pad.", true);
     }
@@ -660,7 +714,7 @@ function startScrubbing(event, key) {
   const timecode = recordedPadTimes[key] ?? defaultPadTime(key);
   if (timecode === null) return;
   
-  activeScrubber = { key, timecode };
+  activeScrubber = { key, timecode, videoId };
   scrubStartX = event.clientX;
   scrubStartTime = timecode;
   
@@ -701,27 +755,28 @@ function handleScrubbing(event) {
 
 function stopScrubbing() {
   if (!activeScrubber) return;
-  
-  const { key, timecode } = activeScrubber;
-  scrubberButtons.get(key)?.classList.remove("scrubbing");
-  
-  document.removeEventListener("pointermove", handleScrubbing);
-  document.removeEventListener("pointerup", stopScrubbing);
-  
+  const { key, timecode, videoId: scrubVideo } = activeScrubber;
+  cancelScrubbing();
   enqueue(async () => {
     try {
-      recordedPadTimes[key] = timecode;
-      recordedPadTimesByVideo[videoId] = { ...recordedPadTimes };
+      if (videoId !== scrubVideo) throw new Error("The video has changed.");
+      if (lockedPads.has(key)) throw new Error("Pad locked. Unlock to change its time.");
+      const times = { ...recordedPadTimes, [key]: timecode };
+      await savePadTimes(times);
       updatePadLabels();
-      await saveVoice({ recordedPadTimesByVideo });
-      if (playing) {
-        await send("update", { recordedPadTimes: { ...recordedPadTimes } });
-      }
     } catch (error) {
-      console.warn("Could not save scrubbed timecode:", error.message);
+      updatePadLabels();
+      showStatus(error.message || "could not save scrubbed timecode.", true);
     }
   });
-  
+}
+
+function cancelScrubbing() {
+  if (!activeScrubber) return;
+  const { key } = activeScrubber;
+  scrubberButtons.get(key)?.classList.remove("scrubbing");
+  document.removeEventListener("pointermove", handleScrubbing);
+  document.removeEventListener("pointerup", stopScrubbing);
   activeScrubber = null;
 }
 
@@ -839,8 +894,20 @@ document.addEventListener("keydown", event => {
     selectStep(null);
   } else if (/^[0-9]$/.test(event.key) && event.target !== bpmInput) {
     event.preventDefault();
+    const button = padButtons.get(event.key);
+    if (!padMode.checked && button && !button.disabled && !lockedPads.has(event.key)) {
+      button.classList.add("record-pressed");
+    }
     triggerPad(event.key);
   }
+});
+
+document.addEventListener("keyup", event => {
+  padButtons.get(event.key)?.classList.remove("record-pressed");
+});
+
+window.addEventListener("blur", () => {
+  for (const button of padButtons.values()) button.classList.remove("record-pressed");
 });
 
 document.addEventListener("pointerdown", event => {
@@ -1052,6 +1119,7 @@ function updateState(state, hydrate = false) {
   for (const button of recordButtons.values()) button.disabled = false;
   for (const button of scrubberButtons.values()) button.disabled = false;
   for (const button of undoButtons.values()) button.disabled = false;
+  updatePadLockControls();
   optionsToggle.disabled = false;
   includeEmptyStepsInput.disabled = false;
   if (playing && hydrate && Array.isArray(state.sequence)) setSequence(state.sequence);
@@ -1145,12 +1213,13 @@ function setUnavailable(message) {
   padMode.disabled = true;
   for (const button of padButtons.values()) {
     button.disabled = true;
-    button.classList.remove("current");
+    button.classList.remove("current", "record-pressed");
   }
   for (const button of prohibitedButtons.values()) button.disabled = true;
   for (const button of recordButtons.values()) button.disabled = true;
   for (const button of scrubberButtons.values()) button.disabled = true;
   for (const button of undoButtons.values()) button.disabled = true;
+  for (const button of padLockButtons.values()) button.disabled = true;
   optionsToggle.disabled = !chorusReady;
   includeEmptyStepsInput.disabled = !chorusReady;
   transport.disabled = !chorusReady;
@@ -1462,6 +1531,7 @@ async function initialize() {
       ? saved.prohibitedPads.filter(key => typeof key === "string" && /^[0-9]$/.test(key))
       : []);
     recordedPadTimesByVideo = normalizeRecordedPadTimesByVideo(session.recordedPadTimesByVideo);
+    syncPadLocks(session);
     updateProhibitedPadControls();
     if (Array.isArray(saved.sequence) && saved.sequence.length > 0 &&
         saved.sequence.every(validStep)) {

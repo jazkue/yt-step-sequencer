@@ -54,7 +54,7 @@ let chorusQueue = Promise.resolve();
 function defaultChorus() {
   return {
     bpm: 120, length: 8, playing: false, clock: null, clockVersion: 0,
-    metronome: false, resetVersion: 0, recordedPadTimesByVideo: {}, voices: {}
+    metronome: false, resetVersion: 0, recordedPadTimesByVideo: {}, lockedPadsByVideo: {}, voices: {}
   };
 }
 
@@ -155,11 +155,31 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
               (typeof times !== "object" || Array.isArray(times) ||
                Object.entries(times).some(([key, value]) => !/^[0-9]$/.test(key) ||
                  !Number.isFinite(value) || value < 0)))) throw new Error("Invalid pad times.");
+          if (voice.videoId !== videoId) throw new Error("The video has changed.");
+          const previousTimes = session.recordedPadTimesByVideo[videoId] || {};
+          const locked = session.lockedPadsByVideo?.[videoId] || [];
+          if (locked.some(key => previousTimes[key] !== (times || {})[key])) {
+            throw new Error("Unlock the pad before changing its time.");
+          }
           if (times === null) delete session.recordedPadTimesByVideo[videoId];
           else session.recordedPadTimesByVideo[videoId] = times;
         }
         Object.assign(voice, message.changes);
         break;
+      case "yt-step-sequencer:chorus-pad-lock": {
+        if (!voice || !voice.videoId || voice.videoId !== message.videoId) {
+          throw new Error("The video is no longer available.");
+        }
+        if (typeof message.key !== "string" || !/^[0-9]$/.test(message.key) ||
+            typeof message.locked !== "boolean") throw new Error("Invalid pad lock.");
+        session.lockedPadsByVideo ||= {};
+        const locks = new Set(session.lockedPadsByVideo[voice.videoId] || []);
+        if (message.locked) locks.add(message.key);
+        else locks.delete(message.key);
+        if (locks.size) session.lockedPadsByVideo[voice.videoId] = [...locks];
+        else delete session.lockedPadsByVideo[voice.videoId];
+        break;
+      }
       case "yt-step-sequencer:chorus-unassign":
         if (!voice) throw new Error("The sequencer window is no longer available.");
         voice.tabId = null;
@@ -176,7 +196,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           );
           item.prohibitedPads = [];
           item.randomize = false;
-          if (item.videoId) delete session.recordedPadTimesByVideo[item.videoId];
+        }
+        for (const videoId of new Set(Object.values(session.voices).map(item => item.videoId).filter(Boolean))) {
+          const times = session.recordedPadTimesByVideo[videoId] || {};
+          const locked = session.lockedPadsByVideo?.[videoId] || [];
+          const preserved = Object.fromEntries(locked.filter(key =>
+            Object.prototype.hasOwnProperty.call(times, key)
+          ).map(key => [key, times[key]]));
+          if (Object.keys(preserved).length) session.recordedPadTimesByVideo[videoId] = preserved;
+          else delete session.recordedPadTimesByVideo[videoId];
         }
         session.length = 8;
         session.resetVersion = (session.resetVersion || 0) + 1;
