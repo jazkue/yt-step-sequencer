@@ -80,6 +80,7 @@ async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [
     right: popup.width - Math.max(0, popup.width - 412 - (steps.children.length - 8) * 33)
   });
   document.querySelector("#bpm").value = "120";
+  document.querySelector("#pad-mode").checked = true;
 
   const context = createContext({
     document,
@@ -132,6 +133,16 @@ async function setup({ left = 100, right = 1000, width = 412, prohibitedPads = [
     addButton: elements.get("#add-step"),
     record: () => elements.get("#sequence-record").listeners.click(),
     recordButton: elements.get("#sequence-record"),
+    padMode: elements.get("#pad-mode"),
+    setPadMode: play => {
+      const input = elements.get("#pad-mode");
+      input.checked = play;
+      input.listeners.change();
+    },
+    recordPad: key =>
+      elements.get("#pads").children["1234567890".indexOf(key)].children[2].listeners.click(),
+    padButton: key => elements.get("#pads").children["1234567890".indexOf(key)].children[0],
+    padControls: key => elements.get("#pads").children["1234567890".indexOf(key)].children.slice(1),
     settings: elements.get("#settings"),
     transport: elements.get("#transport"),
     videoPlayback: elements.get("#video-playback"),
@@ -496,6 +507,122 @@ Deno.test("assigning pads advances the selected step with mouse and keyboard", a
   assert.equal(app.steps.children[7].children[0].value, "5");
   assert.equal(app.steps.children[0].classList.contains("selected"), true);
   assert.equal(app.form.submissions, 1);
+});
+
+Deno.test("pad rec mode captures clicks and keys without playing or editing the sequence", async () => {
+  const messages = [];
+  const app = await setup({
+    prohibitedPads: ["4"],
+    sendMessage: async (_tab, message) => {
+      messages.push(message);
+      return { ok: true, timecode: message.key === "4" ? 42.375 : 18.5 };
+    }
+  });
+  app.connect();
+  app.updateState({ playing: false, videoId: "first" });
+  assert.equal(app.padMode.checked, true);
+  app.setPadMode(false);
+  assert.equal(app.padMode.attributes["aria-label"], "pad mode: rec");
+  assert.equal(app.padButton("4").attributes["aria-label"], "record current time on pad 4");
+  app.selectStep(0);
+  await app.clickPad("4");
+  app.pressKey("5");
+  await app.settle();
+  assert.deepEqual(messages.map(message => [message.type, message.key]), [
+    ["yt-step-sequencer:record", "4"],
+    ["yt-step-sequencer:record", "5"]
+  ]);
+  assert.equal(app.steps.children[0].children[0].value, "0");
+  assert.equal(app.steps.children[0].classList.contains("selected"), true);
+  assert.deepEqual(app.storageSets.at(-1).recordedPadTimesByVideo.first, { "4": 42.375, "5": 18.5 });
+
+  app.setPadMode(true);
+  assert.equal(app.padMode.attributes["aria-label"], "pad mode: play");
+  await app.clickPad("6");
+  await app.settle();
+  assert.equal(messages.at(-1).type, "yt-step-sequencer:trigger");
+  assert.equal(app.steps.children[0].children[0].value, "6");
+});
+
+Deno.test("pad rec mode hides only the record icons and restores them in play mode", async () => {
+  const app = await setup();
+  for (const key of "1234567890") {
+    assert.ok(!app.padControls(key)[1].hidden);
+  }
+  app.setPadMode(false);
+  for (const key of "1234567890") {
+    const [prohibit, record, scrubber, undo] = app.padControls(key);
+    assert.equal(record.hidden, true);
+    assert.ok(!prohibit.hidden && !scrubber.hidden && !undo.hidden);
+  }
+  app.setPadMode(true);
+  for (const key of "1234567890") {
+    assert.equal(app.padControls(key)[1].hidden, false);
+  }
+});
+
+Deno.test("pad mode is disabled when pads are unavailable or sequence recording starts", async () => {
+  const app = await setup({
+    sendMessage: async (_tab, message) => {
+      if (message.type.endsWith(":metronome")) return { ok: true, metronomeEnabled: true };
+      return { ok: true, playing: true, recordingSequence: true, metronomeEnabled: true };
+    }
+  });
+  assert.equal(app.padMode.disabled, true);
+  app.connect();
+  app.updateState({ playing: false });
+  assert.equal(app.padMode.disabled, false);
+  app.record();
+  assert.equal(app.padMode.disabled, true);
+  await app.settle();
+  assert.equal(app.padMode.disabled, false);
+});
+
+Deno.test("pad rec mode does not trigger sequence recording on pointer down or release", async () => {
+  const messages = [];
+  const app = await setup({
+    sendMessage: async (_tab, message) => {
+      messages.push(message);
+      return { ok: true, timecode: 12.5 };
+    }
+  });
+  app.connect();
+  app.updateState({ playing: true, recordingSequence: true, videoId: "first" });
+  app.setPadMode(false);
+  app.pressPad("5", 123);
+  await app.clickPad("5", { detail: 1, timeStamp: 223 });
+  await app.settle();
+  assert.deepEqual(messages.map(message => message.type), [
+    "yt-step-sequencer:record", "yt-step-sequencer:update"
+  ]);
+  assert.deepEqual(app.storageSets.at(-1).recordedPadTimesByVideo.first, { "5": 12.5 });
+});
+
+Deno.test("pad mode switch leaves Enter and arrow keys available and pad recording errors visible", async () => {
+  const messages = [];
+  const app = await setup({
+    sendMessage: async (_tab, message) => {
+      messages.push(message);
+      return { ok: false, error: "time unavailable" };
+    }
+  });
+  app.connect();
+  app.updateState({ playing: false, videoId: "first" });
+  app.selectStep(0);
+  app.padMode.focus();
+  assert.equal(app.pressKey("Enter"), false);
+  assert.equal(app.pressKey("ArrowLeft"), false);
+  app.setPadMode(false);
+  app.pressKey("2");
+  await app.settle();
+  assert.equal(app.status.textContent, "time unavailable");
+  assert.equal(app.steps.children[0].classList.contains("selected"), true);
+  app.setPadMode(true);
+  app.recordPad("3");
+  await app.settle();
+  assert.deepEqual(messages.map(message => [message.type, message.key]), [
+    ["yt-step-sequencer:record", "2"], ["yt-step-sequencer:record", "3"]
+  ]);
 });
 
 Deno.test("record button clears the pattern and leaves playback running after recording", async () => {

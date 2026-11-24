@@ -296,11 +296,44 @@ button.playing .stop-icon { display: block; }
 #status.error { color: var(--error); }
 #status:empty { display: none; }
 #timing { margin: 8px 0 0; color: var(--error); font-size: 11px; line-height: 1.5; }
+.pad-mode {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+.pad-mode input {
+  appearance: none;
+  position: relative;
+  width: 32px;
+  height: 16px;
+  margin: 0;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  cursor: pointer;
+}
+.pad-mode input::before {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 10px;
+  height: 10px;
+  background: var(--error);
+}
+.pad-mode input:checked::before { left: 18px; background: var(--accent); }
+.pad-mode input:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.pad-mode:has(input:disabled) { opacity: 0.4; cursor: default; }
+.pad-mode input:disabled { cursor: default; }
 .pads {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
   gap: 5px;
-  margin-top: 20px;
+  margin-top: 6px;
 }
 .pad { position: relative; min-width: 0; }
 .pads .pad-play {
@@ -341,6 +374,7 @@ button.playing .stop-icon { display: block; }
 }
 .pads .prohibit-toggle { top: 2px; }
 .pads .record-toggle { bottom: 2px; }
+.pads .record-toggle[hidden] { display: none; }
 .pads .scrubber-toggle { bottom: 2px; left: 2px; right: auto; z-index: 1; }
 .pads .undo-toggle { top: 2px; left: 2px; right: auto; }
 .pad:hover .prohibit-toggle, .pad:hover .record-toggle, .pad:hover .scrubber-toggle, .pad:hover .undo-toggle,

@@ -19,6 +19,8 @@ const transport = document.querySelector("#transport");
 const status = document.querySelector("#status");
 const timing = document.querySelector("#timing");
 const pads = document.querySelector("#pads");
+const padMode = document.querySelector("#pad-mode");
+const padModeControl = document.querySelector("#pad-mode-control");
 const connectBox = document.querySelector("#connect");
 const videoTitle = document.querySelector("#video-title");
 const videoPlayback = document.querySelector("#video-playback");
@@ -219,7 +221,7 @@ for (const key of "1234567890") {
   button.disabled = true;
   let triggeredOnPointerDown = false;
   button.addEventListener("pointerdown", event => {
-    triggeredOnPointerDown = recordingSequence && event.button === 0;
+    triggeredOnPointerDown = padMode.checked && recordingSequence && event.button === 0;
     if (triggeredOnPointerDown) triggerPad(key, event.timeStamp);
   });
   button.addEventListener("click", event => {
@@ -322,7 +324,7 @@ function updatePadLabels() {
       button.textContent = key;
       delete button.dataset.timecode;
       button.title = "timecode unavailable until the video loads";
-      button.setAttribute("aria-label", `play pad ${key}`);
+      button.setAttribute("aria-label", `${padMode.checked ? "play" : "record current time on"} pad ${key}`);
     } else {
       const exact = formatTimecode(timecode);
       // Show recorded timecode instead of pad number, or default pad time
@@ -333,11 +335,20 @@ function updatePadLabels() {
       }
       button.dataset.timecode = compactTimecode(timecode);
       button.title = `pad ${key}: ${exact}`;
-      button.setAttribute("aria-label", `play pad ${key} at ${exact}`);
+      button.setAttribute("aria-label", padMode.checked
+        ? `play pad ${key} at ${exact}`
+        : `record current time on pad ${key}`);
     }
     pad.classList.toggle("pad-recorded", recorded);
   }
 }
+
+padMode.addEventListener("change", () => {
+  padMode.setAttribute("aria-label", `pad mode: ${padMode.checked ? "play" : "rec"}`);
+  for (const button of recordButtons.values()) button.hidden = !padMode.checked;
+  updatePadLabels();
+  if (!status.classList.contains("error")) showGuidance();
+});
 
 function normalizeRecordedPadTimes(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
@@ -532,6 +543,10 @@ function toggleProhibitedPad(key) {
 async function triggerPad(key, timeStamp) {
   const button = padButtons.get(key);
   if (!button || button.disabled) return;
+  if (!padMode.checked) {
+    recordPad(key);
+    return;
+  }
   if (selectedStep !== null && !recordingSequence && !lockedSteps.has(selectedStep)) {
     const input = inputs[selectedStep];
     input.value = key;
@@ -564,7 +579,8 @@ document.addEventListener("keydown", event => {
   if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
   if ((event.key === "ArrowLeft" || event.key === "ArrowRight") &&
       tabId !== null && event.target !== bpmInput && !inputs.includes(event.target) &&
-      !optionsMenu.contains(event.target) && event.target !== optionsToggle) {
+      !optionsMenu.contains(event.target) && event.target !== optionsToggle &&
+      event.target !== padMode) {
     event.preventDefault();
     send("seek", { direction: event.key === "ArrowLeft" ? "backward" : "forward" })
       .catch(error => showStatus(error.message || "could not seek the video.", true));
@@ -586,6 +602,7 @@ document.addEventListener("keydown", event => {
       event.target !== clearButton &&
       event.target !== resetButton &&
       event.target !== sequenceRecordButton &&
+      event.target !== padMode &&
       event.target !== videoPlayback &&
       event.target !== transport &&
       event.target !== bpmDecrease && event.target !== bpmIncrease) {
@@ -604,7 +621,7 @@ document.addEventListener("keydown", event => {
 
 document.addEventListener("pointerdown", event => {
   if (selectedStep === null) return;
-  if (steps.contains(event.target) || pads.contains(event.target) ||
+  if (steps.contains(event.target) || pads.contains(event.target) || padModeControl.contains(event.target) ||
       nextStepButton.contains(event.target)) return;
   selectStep(null);
 });
@@ -795,6 +812,8 @@ function showGuidance() {
     showStatus("steps must be empty or a digit from 0 to 9.", true);
   } else if (!validBpmInput()) {
     showStatus("enter a whole-number bpm from 1 to 999.", true);
+  } else if (!padMode.checked) {
+    showStatus("rec mode. press a pad to save the current video time.");
   } else if (recordingSequence) {
     showStatus("recording. play pads to record the current step.");
   } else if (selectedStep !== null && lockedSteps.has(selectedStep)) {
@@ -818,6 +837,7 @@ function updateState(state, hydrate = false) {
   tapTempoButton.disabled = false;
   metronomeInput.disabled = recordingSequence;
   connectBox.disabled = recordingSequence;
+  padMode.disabled = false;
   for (const button of padButtons.values()) button.disabled = false;
   for (const button of prohibitedButtons.values()) button.disabled = false;
   for (const button of recordButtons.values()) button.disabled = false;
@@ -915,6 +935,7 @@ function setUnavailable(message) {
   tapTempoButton.disabled = true;
   metronomeInput.disabled = true;
   sequenceRecordButton.disabled = true;
+  padMode.disabled = true;
   for (const button of padButtons.values()) {
     button.disabled = true;
     button.classList.remove("current");
@@ -1172,6 +1193,7 @@ function setRecordingStartControls(disabled) {
   metronomeInput.disabled = disabled || recordingSequence;
   optionsToggle.disabled = disabled;
   includeEmptyStepsInput.disabled = disabled;
+  padMode.disabled = disabled;
   for (const buttons of [padButtons, prohibitedButtons, recordButtons, scrubberButtons, undoButtons]) {
     for (const button of buttons.values()) button.disabled = disabled;
   }
