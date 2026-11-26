@@ -58,7 +58,7 @@ let chorusQueue = Promise.resolve();
 function defaultChorus() {
   return {
     bpm: 120, length: 8, playing: false, clock: null, clockVersion: 0,
-    metronome: false, resetVersion: 0, recordedPadTimesByVideo: {}, lockedPadsByVideo: {}, voices: {}
+    metronome: false, resetVersion: 0, recordedPadTimesByTab: {}, lockedPadsByTab: {}, voices: {}
   };
 }
 
@@ -96,7 +96,27 @@ function queueChorus(action) {
 
 async function loadChorus() {
   const saved = await chrome.storage.session.get(chorusKey);
-  return saved[chorusKey] || defaultChorus();
+  const session = saved[chorusKey] || defaultChorus();
+  const migrateTimes = !session.recordedPadTimesByTab;
+  const migrateLocks = !session.lockedPadsByTab;
+  if (migrateTimes || migrateLocks) {
+    session.recordedPadTimesByTab ||= {};
+    session.lockedPadsByTab ||= {};
+    for (const voice of Object.values(session.voices)) {
+      if (!Number.isInteger(voice.tabId) || !voice.videoId) continue;
+      if (migrateTimes) {
+        session.recordedPadTimesByTab[voice.tabId] = Object.fromEntries(
+          Object.entries(session.recordedPadTimesByVideo || {}).map(([id, times]) => [id, { ...times }])
+        );
+      }
+      if (migrateLocks) {
+        session.lockedPadsByTab[voice.tabId] = Object.fromEntries(
+          Object.entries(session.lockedPadsByVideo || {}).map(([id, locks]) => [id, [...locks]])
+        );
+      }
+    }
+  }
+  return session;
 }
 
 async function saveChorus(session) {
@@ -175,34 +195,36 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           throw new Error("Invalid locked steps.");
         }
         if (message.padTime) {
-          const { videoId, times } = message.padTime;
+          const { tabId, videoId, times } = message.padTime;
           if (typeof videoId !== "string" || !videoId || (times !== null &&
               (typeof times !== "object" || Array.isArray(times) ||
                Object.entries(times).some(([key, value]) => !/^[0-9]$/.test(key) ||
                  !Number.isFinite(value) || value < 0)))) throw new Error("Invalid pad times.");
-          if (voice.videoId !== videoId) throw new Error("The video has changed.");
-          const previousTimes = session.recordedPadTimesByVideo[videoId] || {};
-          const locked = session.lockedPadsByVideo?.[videoId] || [];
+          if (!Number.isInteger(tabId) || voice.tabId !== tabId || voice.videoId !== videoId) {
+            throw new Error("The video has changed.");
+          }
+          const previousTimes = session.recordedPadTimesByTab[tabId]?.[videoId] || {};
+          const locked = session.lockedPadsByTab[tabId]?.[videoId] || [];
           if (locked.some(key => previousTimes[key] !== (times || {})[key])) {
             throw new Error("Unlock the pad before changing its time.");
           }
-          if (times === null) delete session.recordedPadTimesByVideo[videoId];
-          else session.recordedPadTimesByVideo[videoId] = times;
+          if (times === null) delete session.recordedPadTimesByTab[tabId]?.[videoId];
+          else (session.recordedPadTimesByTab[tabId] ||= {})[videoId] = times;
         }
         Object.assign(voice, message.changes);
         break;
       case "yt-step-sequencer:chorus-pad-lock": {
-        if (!voice || !voice.videoId || voice.videoId !== message.videoId) {
+        if (!voice || !voice.videoId || voice.videoId !== message.videoId ||
+            !Number.isInteger(message.tabId) || voice.tabId !== message.tabId) {
           throw new Error("The video is no longer available.");
         }
         if (typeof message.key !== "string" || !/^[0-9]$/.test(message.key) ||
             typeof message.locked !== "boolean") throw new Error("Invalid pad lock.");
-        session.lockedPadsByVideo ||= {};
-        const locks = new Set(session.lockedPadsByVideo[voice.videoId] || []);
+        const locks = new Set(session.lockedPadsByTab[voice.tabId]?.[voice.videoId] || []);
         if (message.locked) locks.add(message.key);
         else locks.delete(message.key);
-        if (locks.size) session.lockedPadsByVideo[voice.videoId] = [...locks];
-        else delete session.lockedPadsByVideo[voice.videoId];
+        if (locks.size) (session.lockedPadsByTab[voice.tabId] ||= {})[voice.videoId] = [...locks];
+        else delete session.lockedPadsByTab[voice.tabId]?.[voice.videoId];
         break;
       }
       case "yt-step-sequencer:chorus-unassign":
@@ -222,14 +244,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           item.prohibitedPads = [];
           item.randomize = false;
         }
-        for (const videoId of new Set(Object.values(session.voices).map(item => item.videoId).filter(Boolean))) {
-          const times = session.recordedPadTimesByVideo[videoId] || {};
-          const locked = session.lockedPadsByVideo?.[videoId] || [];
+        for (const item of Object.values(session.voices)) {
+          if (!Number.isInteger(item.tabId) || !item.videoId) continue;
+          const { tabId, videoId } = item;
+          const times = session.recordedPadTimesByTab[tabId]?.[videoId] || {};
+          const locked = session.lockedPadsByTab[tabId]?.[videoId] || [];
           const preserved = Object.fromEntries(locked.filter(key =>
             Object.prototype.hasOwnProperty.call(times, key)
           ).map(key => [key, times[key]]));
-          if (Object.keys(preserved).length) session.recordedPadTimesByVideo[videoId] = preserved;
-          else delete session.recordedPadTimesByVideo[videoId];
+          if (Object.keys(preserved).length) (session.recordedPadTimesByTab[tabId] ||= {})[videoId] = preserved;
+          else delete session.recordedPadTimesByTab[tabId]?.[videoId];
         }
         session.length = 8;
         session.resetVersion = (session.resetVersion || 0) + 1;
@@ -318,6 +342,11 @@ chrome.tabs.onRemoved.addListener(tabId => {
   queueChorus(async () => {
     const session = await loadChorus();
     let changed = false;
+    if (session.recordedPadTimesByTab[tabId] || session.lockedPadsByTab[tabId]) {
+      delete session.recordedPadTimesByTab[tabId];
+      delete session.lockedPadsByTab[tabId];
+      changed = true;
+    }
     for (const voice of Object.values(session.voices)) {
       if (voice.tabId === tabId) {
         voice.tabId = null;

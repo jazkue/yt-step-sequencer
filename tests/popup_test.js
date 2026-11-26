@@ -14,8 +14,8 @@ async function setup({
   const session = {
     bpm: saved.bpm || 120, length: saved.sequence?.length || 8, playing: false,
     clock: null, clockVersion: 0, metronome: false, resetVersion: 0, voices: {},
-    recordedPadTimesByVideo: saved.recordedPadTimesByVideo || {},
-    lockedPadsByVideo: saved.lockedPadsByVideo || {}
+    recordedPadTimesByTab: { 1: saved.recordedPadTimesByVideo || {} },
+    lockedPadsByTab: { 1: saved.lockedPadsByVideo || {} }
   };
   let chorusListener;
   let now = 0;
@@ -124,30 +124,34 @@ async function setup({
               tabId: message.tabId, videoId: message.videoId,
               sequence: saved.sequence || Array(session.length).fill(""),
               lockedSteps: saved.lockedSteps || [], prohibitedPads,
-              recordedPadTimesByVideo: saved.recordedPadTimesByVideo || {},
               randomize: saved.randomize || false, includeEmptySteps: saved.includeEmptySteps !== false
             };
           } else if (message.type.endsWith(":chorus-voice")) {
             if (message.padTime) {
-              const old = session.recordedPadTimesByVideo[message.padTime.videoId] || {};
+              if (voice.tabId !== message.padTime.tabId || voice.videoId !== message.padTime.videoId) {
+                return { ok: false, error: "The video has changed." };
+              }
+              const tabTimes = session.recordedPadTimesByTab[message.padTime.tabId] ||= {};
+              const old = tabTimes[message.padTime.videoId] || {};
               const next = message.padTime.times || {};
-              if ((session.lockedPadsByVideo[message.padTime.videoId] || [])
+              if ((session.lockedPadsByTab[message.padTime.tabId]?.[message.padTime.videoId] || [])
                 .some(key => old[key] !== next[key])) {
                 return { ok: false, error: "Unlock the pad before changing its time." };
               }
-              if (message.padTime.times === null) delete session.recordedPadTimesByVideo[message.padTime.videoId];
-              else session.recordedPadTimesByVideo[message.padTime.videoId] = message.padTime.times;
+              if (message.padTime.times === null) delete tabTimes[message.padTime.videoId];
+              else tabTimes[message.padTime.videoId] = message.padTime.times;
             }
             Object.assign(voice, message.changes);
             storageSets.push(JSON.parse(JSON.stringify({
               ...message.changes,
-              ...(message.padTime && { recordedPadTimesByVideo: session.recordedPadTimesByVideo })
+              ...(message.padTime && { recordedPadTimesByVideo: session.recordedPadTimesByTab[message.padTime.tabId] })
             })));
           } else if (message.type.endsWith(":chorus-pad-lock")) {
-            const locks = new Set(session.lockedPadsByVideo[message.videoId] || []);
+            const tabLocks = session.lockedPadsByTab[message.tabId] ||= {};
+            const locks = new Set(tabLocks[message.videoId] || []);
             if (message.locked) locks.add(message.key);
             else locks.delete(message.key);
-            session.lockedPadsByVideo[message.videoId] = [...locks];
+            tabLocks[message.videoId] = [...locks];
           } else if (message.type.endsWith(":chorus-length")) {
             for (const item of Object.values(session.voices)) {
               if (message.length > session.length) item.sequence.push("");
@@ -178,10 +182,12 @@ async function setup({
               item.randomize = false;
               storageSets.push({ prohibitedPads: [] });
             }
-            for (const id of new Set(Object.values(session.voices).map(item => item.videoId).filter(Boolean))) {
-              const times = session.recordedPadTimesByVideo[id] || {};
-              const locks = session.lockedPadsByVideo[id] || [];
-              session.recordedPadTimesByVideo[id] = Object.fromEntries(
+            for (const item of Object.values(session.voices)) {
+              if (!Number.isInteger(item.tabId) || !item.videoId) continue;
+              const tabTimes = session.recordedPadTimesByTab[item.tabId] ||= {};
+              const times = tabTimes[item.videoId] || {};
+              const locks = session.lockedPadsByTab[item.tabId]?.[item.videoId] || [];
+              tabTimes[item.videoId] = Object.fromEntries(
                 locks.filter(key => Object.prototype.hasOwnProperty.call(times, key)).map(key => [key, times[key]])
               );
             }
@@ -1240,6 +1246,39 @@ Deno.test("rec mode highlights held number keys and clears on release, mode chan
   assert.equal(messages.filter(message => message.type.endsWith(":record")).length, 3);
 });
 
+Deno.test("another tab of the same video cannot change this voice's pads or sequence", async () => {
+  const messages = [];
+  const app = await setup({
+    connected: true,
+    saved: { sequence: ["1", "2"], recordedPadTimesByVideo: { first: { "1": 12 } } },
+    sendMessage: async (_tab, message) => {
+      messages.push(message);
+      if (message.type.endsWith(":status")) {
+        return { ok: true, playing: false, videoId: "first", videoDuration: 100 };
+      }
+      return { ok: true };
+    }
+  });
+  let otherVoice;
+  app.updateSession(session => {
+    otherVoice = session.voices["2"] = {
+      tabId: 2, videoId: "first", sequence: ["8", "9"], lockedSteps: [],
+      prohibitedPads: [], randomize: false, includeEmptySteps: true
+    };
+    session.recordedPadTimesByTab["2"] = { first: { "1": 33 } };
+    session.lockedPadsByTab["2"] = { first: ["1"] };
+  });
+  await app.settle();
+  assert.equal(app.padButton("1").textContent, "00:12.00");
+  assert.equal(app.padControls("1")[4].attributes["aria-pressed"], "false");
+  assert.equal(app.steps.children[0].children[0].value, "1");
+  app.clear();
+  await app.settle();
+  assert.equal(app.steps.children[0].children[0].value, "");
+  assert.deepEqual(otherVoice.sequence, ["8", "9"]);
+  assert.equal(messages.some(message => message.type.endsWith(":update")), false);
+});
+
 Deno.test("pad locks prevent recording and reset but allow playback", async () => {
   const messages = [];
   const app = await setup({
@@ -1299,7 +1338,7 @@ Deno.test("a lock from another window cancels an active pad scrub", async () => 
   app.startPadScrub("1");
   app.scrubMove(10);
   assert.equal(app.padButton("1").textContent, "00:13.00");
-  app.updateSession(session => { session.lockedPadsByVideo.first = ["1"]; });
+  app.updateSession(session => { session.lockedPadsByTab["1"].first = ["1"]; });
   app.finishScrub();
   await app.settle();
   assert.equal(app.padButton("1").textContent, "00:12.00");
@@ -1329,7 +1368,7 @@ Deno.test("a pad locked while recording cannot be overwritten by the pending cap
   app.setPadMode(false);
   app.clickPad("1");
   await started;
-  app.updateSession(session => { session.lockedPadsByVideo.first = ["1"]; });
+  app.updateSession(session => { session.lockedPadsByTab["1"].first = ["1"]; });
   resolveRecord({ ok: true, timecode: 33 });
   await app.settle();
   assert.equal(app.padButton("1").textContent, "00:12.00");

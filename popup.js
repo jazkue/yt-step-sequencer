@@ -99,7 +99,8 @@ function connectChorus() {
 
 async function saveVoice(changes) {
   const { recordedPadTimesByVideo: times, ...voiceChanges } = changes;
-  const padTime = times && videoId ? { videoId, times: times[videoId] ?? null } : undefined;
+  const padTime = times && videoId && tabId !== null
+    ? { tabId, videoId, times: times[videoId] ?? null } : undefined;
   return chorusCommand("voice", { changes: voiceChanges, ...(padTime && { padTime }) });
 }
 
@@ -110,7 +111,7 @@ function applyChorus(session) {
   const voice = session.voices[String(chorusWindowId)];
   if (!voice) return;
   const reset = (session.resetVersion || 0) !== (previous?.resetVersion || 0);
-  const times = normalizeRecordedPadTimesByVideo(session.recordedPadTimesByVideo);
+  const times = normalizeRecordedPadTimesByVideo(session.recordedPadTimesByTab?.[tabId]);
   const currentTimes = videoId ? { ...(times[videoId] || {}) } : {};
   const timesChanged = JSON.stringify(currentTimes) !== JSON.stringify(recordedPadTimes);
   recordedPadTimesByVideo = times;
@@ -555,7 +556,8 @@ function updatePadLockControls() {
 }
 
 function syncPadLocks(session) {
-  lockedPads = new Set(videoId ? session.lockedPadsByVideo?.[videoId] || [] : []);
+  lockedPads = new Set(videoId && tabId !== null
+    ? session.lockedPadsByTab?.[tabId]?.[videoId] || [] : []);
   if (activeScrubber && (activeScrubber.videoId !== videoId || lockedPads.has(activeScrubber.key))) {
     const changedVideo = activeScrubber.videoId !== videoId;
     cancelScrubbing();
@@ -569,7 +571,7 @@ function togglePadLock(key) {
   if (padLockButtons.get(key)?.disabled) return;
   enqueue(async () => {
     try {
-      await chorusCommand("pad-lock", { videoId, key, locked: !lockedPads.has(key) });
+      await chorusCommand("pad-lock", { tabId, videoId, key, locked: !lockedPads.has(key) });
       status.classList.remove("error");
       showGuidance();
     } catch (error) {
@@ -1732,7 +1734,7 @@ async function initialize() {
     prohibitedPads = new Set(Array.isArray(saved.prohibitedPads)
       ? saved.prohibitedPads.filter(key => typeof key === "string" && /^[0-9]$/.test(key))
       : []);
-    recordedPadTimesByVideo = normalizeRecordedPadTimesByVideo(session.recordedPadTimesByVideo);
+    recordedPadTimesByVideo = normalizeRecordedPadTimesByVideo(session.recordedPadTimesByTab?.[tabId]);
     syncPadLocks(session);
     updateProhibitedPadControls();
     if (Array.isArray(saved.sequence) && saved.sequence.length > 0 &&
