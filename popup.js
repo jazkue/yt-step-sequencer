@@ -29,6 +29,7 @@ const videoSpeedValue = document.querySelector("#video-speed-value");
 const link = document.querySelector("#link");
 const optionsToggle = document.querySelector("#options-toggle");
 const optionsMenu = document.querySelector("#options-menu");
+const closeAllWindowsButton = document.querySelector("#close-all-windows");
 const addVideoButton = document.querySelector("#add-video");
 const videoMenu = document.querySelector("#video-menu");
 const flashTimers = new WeakMap();
@@ -132,7 +133,7 @@ function applyChorus(session) {
     localEnginePlaying = false;
     appliedMetronome = false;
     videoTitle.textContent = "";
-    setUnavailable("choose a video with +.");
+    setUnavailable("add a video with +");
   }
   syncPadLocks(session);
   if (reset) {
@@ -305,6 +306,19 @@ optionsToggle.addEventListener("click", () => {
   setOptionsOpen(optionsMenu.hidden);
 });
 
+closeAllWindowsButton.addEventListener("click", async () => {
+  closeAllWindowsButton.disabled = true;
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: `${prefix}close-all-windows`, windowId: chorusWindowId
+    });
+    if (!response?.ok) throw new Error(response?.error || "could not close all sequencer windows.");
+  } catch (error) {
+    closeAllWindowsButton.disabled = false;
+    showStatus(error.message || "could not close all sequencer windows.", true);
+  }
+});
+
 document.addEventListener("pointerdown", event => {
   if (!optionsMenu.hidden && !optionsMenu.contains(event.target) &&
       !optionsToggle.contains(event.target)) {
@@ -438,7 +452,7 @@ function toggleStepLock(index) {
 }
 
 function defaultSequence() {
-  return Array.from({ length: 8 }, (_, index) => String(index));
+  return Array(8).fill("");
 }
 
 setSequence(defaultSequence());
@@ -1133,7 +1147,7 @@ function showGuidance() {
   } else if (!validBpmInput()) {
     showStatus("enter a whole-number bpm from 1 to 999.", true);
   } else if (tabId === null && chorusReady) {
-    showStatus("choose a video with +.");
+    showStatus("add a video with +");
   } else if (!padMode.checked) {
     showStatus("rec mode. press a pad to save the current video time.");
   } else if (selectedStep !== null && lockedSteps.has(selectedStep)) {
@@ -1733,7 +1747,7 @@ async function initialize() {
     bpmInput.value = String(session.bpm);
     chorusReady = true;
     if (tabId === null) {
-      setUnavailable("choose a video with +.");
+      setUnavailable("add a video with +");
       applyChorus(chorusSession);
       return;
     }

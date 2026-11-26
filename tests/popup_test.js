@@ -5,7 +5,7 @@ const source = await Deno.readTextFile(new URL("../popup.js", import.meta.url));
 
 async function setup({
   left = 100, right = 1000, width = 412, frameHeight = 0, contentHeight = 460,
-  prohibitedPads = [], saved = {}, sendMessage, connected = false
+  prohibitedPads = [], saved = {}, sendMessage, connected = false, closeAll = async () => ({ ok: true })
 } = {}) {
   const popup = { id: 1, left, top: 100, width, height: 460 };
   const updates = [];
@@ -117,11 +117,12 @@ async function setup({
           onDisconnect: { addListener() {} }
         }),
         sendMessage: async message => {
+          if (message.type.endsWith(":close-all-windows")) return closeAll(message);
           const voice = session.voices["1"];
           if (message.type.endsWith(":chorus-register")) {
             session.voices["1"] = voice || {
               tabId: message.tabId, videoId: message.videoId,
-              sequence: saved.sequence || Array.from({ length: 8 }, (_, index) => String(index)),
+              sequence: saved.sequence || Array(session.length).fill(""),
               lockedSteps: saved.lockedSteps || [], prohibitedPads,
               recordedPadTimesByVideo: saved.recordedPadTimesByVideo || {},
               randomize: saved.randomize || false, includeEmptySteps: saved.includeEmptySteps !== false
@@ -171,7 +172,7 @@ async function setup({
             }
             for (const item of Object.values(session.voices)) {
               item.sequence = Array.from({ length: 8 }, (_, index) =>
-                item.lockedSteps.includes(index) ? item.sequence[index] : String(index)
+                item.lockedSteps.includes(index) ? item.sequence[index] : ""
               );
               item.prohibitedPads = [];
               item.randomize = false;
@@ -300,6 +301,8 @@ async function setup({
     increaseBpm: () => elements.get("#bpm-increase").listeners.click(),
     decreaseBpm: () => elements.get("#bpm-decrease").listeners.click(),
     status: elements.get("#status"),
+    closeAllButton: elements.get("#close-all-windows"),
+    closeAll: () => elements.get("#close-all-windows").listeners.click(),
     tap: time => { now = time; elements.get("#tap-tempo").listeners.click(); },
     selectStep: index => runInContext(`selectStep(${index})`, context),
     focusStep: index => steps.children[index].children[0].focus(),
@@ -342,6 +345,32 @@ async function setup({
     }
   };
 }
+
+Deno.test("close all sends the current window and reports failures", async () => {
+  const messages = [];
+  let fail = true;
+  const app = await setup({
+    closeAll: async message => {
+      messages.push(message);
+      return fail ? { ok: false, error: "windows blocked" } : { ok: true };
+    }
+  });
+  await app.closeAll();
+  assert.equal(app.status.textContent, "windows blocked");
+  assert.equal(app.closeAllButton.disabled, false);
+  fail = false;
+  await app.closeAll();
+  assert.equal(app.closeAllButton.disabled, true);
+  assert.deepEqual(messages.map(message => [message.type, message.windowId]), [
+    ["yt-step-sequencer:close-all-windows", 1],
+    ["yt-step-sequencer:close-all-windows", 1]
+  ]);
+});
+
+Deno.test("a new sequencer window starts with eight empty steps", async () => {
+  const app = await setup();
+  assert.deepEqual(app.steps.children.map(step => step.children[0].value), Array(8).fill(""));
+});
 
 Deno.test("adding steps grows right without scrolling or shifting the window", async () => {
   const app = await setup();
@@ -464,7 +493,7 @@ Deno.test("a global reset updates a playing voice's sequence, pads, times and ra
   app.reset();
   await app.settle();
   assert.equal(app.steps.children[0].children[0].value, "9");
-  assert.equal(app.steps.children[1].children[0].value, "1");
+  assert.equal(app.steps.children[1].children[0].value, "");
   assert.equal(app.isPadForbidden("1"), false);
   assert.deepEqual(messages.map(message => message.type), [
     "yt-step-sequencer:prohibited", "yt-step-sequencer:update",
@@ -472,7 +501,7 @@ Deno.test("a global reset updates a playing voice's sequence, pads, times and ra
   ]);
   assert.equal(messages[1].randomize, false);
   assert.equal(Object.keys(messages[2].recordedPadTimes).length, 0);
-  assert.deepEqual([...messages[3].sequence], ["9", "1", "2", "3", "4", "5", "6", "7"]);
+  assert.deepEqual([...messages[3].sequence], ["9", "", "", "", "", "", "", ""]);
   assert.equal(app.steps.children.length, 8);
 });
 
@@ -488,14 +517,14 @@ Deno.test("a reset initiated in another window updates this voice", async () => 
   });
   app.connect();
   app.updateSession(session => {
-    session.voices["1"].sequence = ["0", "1", "2", "3", "4", "5", "6", "7"];
+    session.voices["1"].sequence = Array(8).fill("");
     session.length = 8;
     session.voices["1"].prohibitedPads = [];
     session.voices["1"].randomize = false;
     session.resetVersion++;
   });
   await app.settle();
-  assert.equal(app.steps.children[0].children[0].value, "0");
+  assert.equal(app.steps.children[0].children[0].value, "");
   assert.equal(app.isPadForbidden("1"), false);
   assert.equal(messages.at(-1).type, "yt-step-sequencer:prohibited");
 });
@@ -556,7 +585,7 @@ Deno.test("locked steps persist and resist pad entry, randomize, clear, reset, a
   await app.settle();
   assert.equal(app.steps.children.length, 8);
   assert.equal(app.steps.children[0].children[0].value, "4");
-  assert.equal(app.steps.children[1].children[0].value, "1");
+  assert.equal(app.steps.children[1].children[0].value, "");
   assert.equal(app.status.classList.contains("error"), false);
 });
 
@@ -1012,6 +1041,7 @@ Deno.test("assigning pads advances the selected step with mouse and keyboard", a
   const messages = [];
   const app = await setup({
     prohibitedPads: ["4"],
+    saved: { sequence: ["0", "1", "2", "3", "4", "5", "6", "7"] },
     sendMessage: async (_tab, message) => { messages.push(message); return { ok: true }; }
   });
   app.connect();
@@ -1048,6 +1078,7 @@ Deno.test("assigning pads advances the selected step with mouse and keyboard", a
 Deno.test("space and tab empty selected steps and advance without playing the video", async () => {
   const messages = [];
   const app = await setup({
+    saved: { sequence: ["0", "1", "2", "3", "4", "5", "6", "7"] },
     sendMessage: async (_tab, message) => { messages.push(message); return { ok: true }; }
   });
   app.connect();
@@ -1076,7 +1107,7 @@ Deno.test("space and tab empty selected steps and advance without playing the vi
 
 Deno.test("space and tab do not change locked steps or other controls", async () => {
   const app = await setup({
-    saved: { lockedSteps: [0] },
+    saved: { sequence: ["0", "1", "2", "3", "4", "5", "6", "7"], lockedSteps: [0] },
     sendMessage: async () => ({ ok: true })
   });
   app.connect();
@@ -1150,6 +1181,7 @@ Deno.test("pad rec mode captures clicks and keys without playing or editing the 
   const messages = [];
   const app = await setup({
     prohibitedPads: ["4"],
+    saved: { sequence: ["0", "1", "2", "3", "4", "5", "6", "7"] },
     sendMessage: async (_tab, message) => {
       messages.push(message);
       return { ok: true, timecode: message.key === "4" ? 42.375 : 18.5 };

@@ -54,7 +54,7 @@ h1 {
   width: 332px;
   margin-bottom: 8px;
 }
-.options { position: relative; display: flex; gap: 5px; }
+.options { position: relative; z-index: 3; display: flex; gap: 5px; }
 #add-video {
   width: 28px;
   height: 28px;
@@ -121,6 +121,20 @@ h1 {
   margin: 0;
   accent-color: var(--ink);
 }
+#close-all-windows {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin-top: 8px;
+  padding: 5px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+}
+#close-all-windows:hover:not(:disabled) { background: var(--input); }
 
 .sequencer-layout { position: relative; width: 332px; }
 
@@ -180,6 +194,9 @@ input {
 }
 
 .step input { display: block; height: auto; aspect-ratio: 1; font-size: 15px; scroll-margin: 4px; }
+.step:is(:nth-child(8n + 5), :nth-child(8n + 6), :nth-child(8n + 7), :nth-child(8n + 8)) input {
+  background: color-mix(in srgb, var(--input) 70%, transparent);
+}
 .step.active input { background: var(--accent); color: var(--ink); }
 .step input[readonly] { opacity: 0.5; }
 .step.selected input { outline: 2px solid var(--focus); outline-offset: 2px; }

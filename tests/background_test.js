@@ -3,7 +3,7 @@ import { runInNewContext } from "node:vm";
 
 const source = await Deno.readTextFile(new URL("../background.js", import.meta.url));
 
-function setup({ sourceWindow, displays, create = async () => {}, open = [] }) {
+function setup({ sourceWindow, displays, create = async () => {}, remove = async () => {}, open = [] }) {
   let handler;
   let messageHandler;
   let windowRemoved;
@@ -11,6 +11,7 @@ function setup({ sourceWindow, displays, create = async () => {}, open = [] }) {
   const windows = [];
   const errors = [];
   const updated = [];
+  const removed = [];
   const stopped = [];
   const store = {};
   const cleared = [];
@@ -23,6 +24,7 @@ function setup({ sourceWindow, displays, create = async () => {}, open = [] }) {
         get: async () => sourceWindow,
         getAll: async () => open,
         update: async (id, options) => { updated.push({ id, options }); },
+        remove: async id => { removed.push(id); await remove(id); windowRemoved(id); },
         onRemoved: { addListener: fn => { windowRemoved = fn; } },
         create: async options => { windows.push(options); await create(options); }
       },
@@ -48,10 +50,12 @@ function setup({ sourceWindow, displays, create = async () => {}, open = [] }) {
     console: { error: (...args) => errors.push(args), warn() {} }
   });
   return {
-    handler, windows, errors, updated, stopped, cleared,
+    handler, windows, errors, updated, removed, stopped, cleared,
     advance: time => { now = time; },
     send: (type, data = {}) => new Promise(resolve =>
       messageHandler({ type: `yt-step-sequencer:chorus-${type}`, ...data }, {}, resolve)),
+    closeAll: windowId => new Promise(resolve =>
+      messageHandler({ type: "yt-step-sequencer:close-all-windows", windowId }, {}, resolve)),
     removeWindow: windowRemoved,
     removeTab: tabRemoved
   };
@@ -139,6 +143,41 @@ Deno.test("brings all existing sequencer windows forward without opening another
   assert.equal(app.windows.length, 0);
 });
 
+Deno.test("close all removes only sequencer windows and cleans up voices", async () => {
+  const app = setup({
+    sourceWindow: {}, displays: [],
+    open: [
+      { id: 5, tabs: [{ url: "chrome-extension://abc/popup.html?tabId=11" }] },
+      { id: 6, tabs: [{ url: "chrome-extension://abc/popup.html" }] },
+      { id: 7, tabs: [{ url: "https://www.youtube.com/watch?v=other" }] },
+      { id: 8, tabs: [{ url: "chrome-extension://other/popup.html" }] }
+    ]
+  });
+  await app.send("register", { windowId: 5, tabId: 11, videoId: "a" });
+  await app.send("register", { windowId: 6, tabId: 12, videoId: "b" });
+  await app.send("transport", { playing: true });
+  assert.equal((await app.closeAll(5)).ok, true);
+  assert.deepEqual(app.removed, [6, 5]);
+  const state = await app.send("get");
+  assert.equal(Object.keys(state.session.voices).length, 0);
+  assert.deepEqual(app.stopped.map(item => item.id), [12, 11]);
+  assert.ok(app.cleared[0].includes("recordedPadTimesByVideo"));
+});
+
+Deno.test("close all reports failures and keeps the initiating window open", async () => {
+  const app = setup({
+    sourceWindow: {}, displays: [],
+    open: [5, 6, 7].map(id => ({ id, tabs: [{ url: "chrome-extension://abc/popup.html" }] })),
+    remove: async id => { if (id === 6) throw new Error("blocked"); }
+  });
+  const result = await app.closeAll(5);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /could not close all/i);
+  assert.deepEqual(app.removed, [6, 7]);
+  assert.equal(app.errors.length, 1);
+  assert.equal((await app.closeAll(99)).ok, false);
+});
+
 Deno.test("chorus shares transport, tempo and length while protecting all locked steps", async () => {
   const app = setup({ sourceWindow: {}, displays: [] });
   await app.send("register", { windowId: 1, tabId: 11, videoId: "a" });
@@ -167,6 +206,21 @@ Deno.test("speeding up from a slow tempo schedules the next beat promptly", asyn
   const changed = await app.send("bpm", { bpm: 120 });
   assert.equal(changed.session.clock.startAt, 1001250);
   assert.equal(changed.session.clock.step, 1);
+});
+
+Deno.test("new voices start empty at the shared length without changing existing voices", async () => {
+  const app = setup({ sourceWindow: {}, displays: [] });
+  let state = await app.send("register", { windowId: 1, tabId: 11, videoId: "a" });
+  assert.deepEqual([...state.session.voices["1"].sequence], Array(8).fill(""));
+  await app.send("voice", {
+    windowId: 1, changes: { sequence: ["4", "", "", "", "", "", "", ""] }
+  });
+  await app.send("length", { length: 9 });
+  state = await app.send("register", { windowId: 2, tabId: 12, videoId: "b" });
+  assert.deepEqual([...state.session.voices["2"].sequence], Array(9).fill(""));
+  assert.equal(state.session.voices["1"].sequence[0], "4");
+  state = await app.send("register", { windowId: 1, tabId: 11, videoId: "a" });
+  assert.equal(state.session.voices["1"].sequence[0], "4");
 });
 
 Deno.test("voices can join playback and retain their sequence after losing or replacing a video", async () => {
@@ -222,8 +276,8 @@ Deno.test("reset restores eight steps in all voices while protecting locked step
   assert.equal(session.bpm, 90);
   assert.equal(session.length, 8);
   assert.equal(session.resetVersion, 1);
-  assert.equal(session.voices["1"].sequence.join(","), "9,1,2,3,4,5,6,7");
-  assert.equal(session.voices["2"].sequence.join(","), "0,7,2,3,4,5,6,7");
+  assert.deepEqual([...session.voices["1"].sequence], ["9", "", "", "", "", "", "", ""]);
+  assert.deepEqual([...session.voices["2"].sequence], ["", "7", "", "", "", "", "", ""]);
   for (const voice of Object.values(session.voices)) {
     assert.equal(voice.prohibitedPads.length, 0);
     assert.equal(voice.randomize, false);
@@ -238,8 +292,8 @@ Deno.test("reset expands short sequences to eight steps", async () => {
   await app.send("length", { length: 7 });
   const { session } = await app.send("reset", { windowId: 2 });
   assert.equal(session.length, 8);
-  assert.equal(session.voices["1"].sequence.join(","), "0,1,2,3,4,5,6,7");
-  assert.equal(session.voices["2"].sequence.join(","), "0,1,2,3,4,5,6,7");
+  assert.deepEqual([...session.voices["1"].sequence], Array(8).fill(""));
+  assert.deepEqual([...session.voices["2"].sequence], Array(8).fill(""));
 });
 
 Deno.test("pad locks protect shared video times from edits and global reset", async () => {

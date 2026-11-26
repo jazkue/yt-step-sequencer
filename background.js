@@ -1,8 +1,12 @@
+async function sequencerWindows() {
+  const popupUrl = chrome.runtime.getURL("popup.html");
+  return (await chrome.windows.getAll({ populate: true, windowTypes: ["popup"] }))
+    .filter(window => window.tabs?.some(item => item.url?.split(/[?#]/, 1)[0] === popupUrl));
+}
+
 chrome.action.onClicked.addListener(async tab => {
   try {
-    const popupUrl = chrome.runtime.getURL("popup.html");
-    const existing = (await chrome.windows.getAll({ populate: true, windowTypes: ["popup"] }))
-      .filter(window => window.tabs?.some(item => item.url?.split(/[?#]/, 1)[0] === popupUrl));
+    const existing = await sequencerWindows();
     if (existing.length) {
       for (const window of existing) {
         try {
@@ -107,6 +111,27 @@ chrome.runtime.onConnect.addListener(port => {
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === "yt-step-sequencer:close-all-windows") {
+    (async () => {
+      const windows = await sequencerWindows();
+      if (!Number.isInteger(message.windowId) || !windows.some(window => window.id === message.windowId)) {
+        throw new Error("The sequencer window is no longer available.");
+      }
+      let failed = false;
+      for (const window of windows.filter(window => window.id !== message.windowId)) {
+        try {
+          await chrome.windows.remove(window.id);
+        } catch (error) {
+          failed = true;
+          console.error("Could not close the sequencer window:", error);
+        }
+      }
+      if (failed) throw new Error("Could not close all sequencer windows.");
+      await chrome.windows.remove(message.windowId);
+      sendResponse({ ok: true });
+    })().catch(error => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
   if (!message || typeof message.type !== "string" ||
       !message.type.startsWith("yt-step-sequencer:chorus-")) return;
   queueChorus(async () => {
@@ -125,7 +150,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         if (!voice) {
           session.voices[id] = {
             tabId: message.tabId, videoId: message.videoId,
-            sequence: Array.from({ length: session.length }, (_, index) => index < 8 ? String(index) : ""),
+            sequence: Array(session.length).fill(""),
             lockedSteps: [], prohibitedPads: [],
             randomize: false, includeEmptySteps: true
           };
@@ -192,7 +217,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         }
         for (const item of Object.values(session.voices)) {
           item.sequence = Array.from({ length: 8 }, (_, index) =>
-            item.lockedSteps.includes(index) ? item.sequence[index] : String(index)
+            item.lockedSteps.includes(index) ? item.sequence[index] : ""
           );
           item.prohibitedPads = [];
           item.randomize = false;
