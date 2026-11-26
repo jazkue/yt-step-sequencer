@@ -15,7 +15,7 @@ function setup({
   const handlers = {};
   const location = { href: "https://www.youtube.com/watch?v=first" };
   const video = {
-    paused: false, muted: false, volume: 1, currentTime: 0, duration: 100,
+    paused: false, muted: false, volume: 1, playbackRate: 1, currentTime: 0, duration: 100,
     pause() { this.paused = true; },
     play() { this.paused = false; return Promise.resolve(); }
   };
@@ -153,6 +153,27 @@ Deno.test("video volume rejects invalid values and unavailable players", () => {
   app.removeVideo();
   assert.equal(app.send("video-volume", { volume: 50 }).ok, false);
   assert.equal(app.send("status").videoVolume, null);
+});
+
+Deno.test("video speed controls and reports the selected video's playback rate", () => {
+  const app = setup();
+  const observer = app.connect();
+  app.video.paused = true;
+  assert.equal(app.send("status").videoSpeed, 1);
+  assert.equal(app.send("video-speed", { videoId: "first", speed: 0.25 }).videoSpeed, 0.25);
+  assert.equal(app.video.paused, true);
+  app.video.playbackRate = 1.5;
+  app.videoEvent("ratechange");
+  assert.equal(observer.updates.at(-1).videoSpeed, 1.5);
+  for (const speed of [0, 2.01, NaN, "1"]) {
+    assert.equal(app.send("video-speed", { videoId: "first", speed }).ok, false);
+  }
+  app.navigate("https://www.youtube.com/watch?v=second");
+  assert.equal(app.send("video-speed", { videoId: "first", speed: 1 }).ok, false);
+  assert.equal(app.video.playbackRate, 1.5);
+  app.removeVideo();
+  assert.equal(app.send("video-speed", { videoId: "second", speed: 1 }).ok, false);
+  assert.equal(app.send("status").videoSpeed, null);
 });
 
 Deno.test("video seek moves five seconds, clamps to video bounds, and preserves playback state", () => {

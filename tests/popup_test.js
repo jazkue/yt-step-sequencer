@@ -262,11 +262,24 @@ async function setup({
     transport: elements.get("#transport"),
     videoPlayback: elements.get("#video-playback"),
     videoVolume: elements.get("#video-volume"),
+    videoSpeed: elements.get("#video-speed"),
+    videoSpeedValue: elements.get("#video-speed-value"),
     setVideoVolume: value => {
       const input = elements.get("#video-volume");
       input.value = String(value);
       input.listeners.input();
     },
+    setVideoSpeed: value => {
+      const input = elements.get("#video-speed");
+      input.value = String(value);
+      input.listeners.input();
+    },
+    startSpeedDrag: () => elements.get("#video-speed").listeners.pointerdown({ pointerId: 7 }),
+    finishSpeedDrag: () => {
+      for (const listener of document.listeners.pointerup || []) listener({ pointerId: 7 });
+    },
+    resetSpeed: () => elements.get("#video-speed").listeners.dblclick(),
+    resetVolume: () => elements.get("#video-volume").listeners.dblclick(),
     toggleVideo: () => elements.get("#video-playback").listeners.click(),
     emit: message => portMessage(message),
     isPadForbidden: key => runInContext(`prohibitedPads.has("${key}")`, context),
@@ -707,6 +720,145 @@ Deno.test("tap and rapid BPM adjustments retain the latest requested value", asy
   app.decreaseBpm();
   await app.settle();
   assert.equal(app.bpm.value, "116");
+});
+
+Deno.test("speed defaults to 1x for a selected video and tracks later changes", async () => {
+  const messages = [];
+  let speed = 1.5;
+  let fail = false;
+  const app = await setup({
+    connected: true,
+    sendMessage: async (tab, message) => {
+      if (message.type.endsWith(":status")) {
+        return { ok: true, playing: false, videoId: "first", videoSpeed: speed };
+      }
+      if (message.type.endsWith(":video-speed")) {
+        messages.push({ tab, speed: message.speed, videoId: message.videoId });
+        if (fail) return { ok: false, error: "speed unavailable" };
+        speed = message.speed;
+        return { ok: true, videoSpeed: speed };
+      }
+      return { ok: true };
+    }
+  });
+  await app.settle();
+  assert.deepEqual(messages, [{ tab: 1, speed: 1, videoId: "first" }]);
+  assert.equal(app.videoSpeed.value, "1");
+  assert.equal(app.videoSpeedValue.textContent, "1x");
+  app.emit({ videoSpeed: 1.5 });
+  assert.equal(app.videoSpeedValue.textContent, "1.5x");
+  app.videoSpeed.focus();
+  assert.equal(app.pressKey("ArrowLeft"), false);
+  assert.equal(app.pressKey("2"), false);
+  app.setVideoSpeed(0.25);
+  await app.settle();
+  assert.equal(app.videoSpeedValue.textContent, "0.25x");
+  fail = true;
+  app.setVideoSpeed(2);
+  await app.settle();
+  assert.equal(app.videoSpeed.value, "0.25");
+  assert.equal(app.status.textContent, "speed unavailable");
+  app.updateSession(session => { session.voices["1"].tabId = null; });
+  assert.equal(app.videoSpeed.disabled, true);
+});
+
+Deno.test("speed resets when a delayed player becomes available and keeps the latest drag", async () => {
+  let resolveFirst;
+  let signalStarted;
+  const started = new Promise(resolve => { signalStarted = resolve; });
+  const speeds = [];
+  const app = await setup({
+    connected: true,
+    sendMessage: async (_tab, message) => {
+      if (message.type.endsWith(":status")) {
+        return { ok: true, playing: false, videoId: "first", videoSpeed: null };
+      }
+      if (message.type.endsWith(":video-speed")) {
+        speeds.push(message.speed);
+        if (speeds.length === 2) {
+          signalStarted();
+          return new Promise(resolve => { resolveFirst = resolve; });
+        }
+        return { ok: true, videoSpeed: message.speed };
+      }
+      return { ok: true };
+    }
+  });
+  assert.equal(app.videoSpeed.disabled, true);
+  app.updateState({ playing: false, videoSpeed: 1.5 });
+  await app.settle();
+  assert.deepEqual(speeds, [1]);
+  app.setVideoSpeed(0.5);
+  await started;
+  app.setVideoSpeed(1.5);
+  app.setVideoSpeed(2);
+  app.emit({ videoSpeed: 0.5 });
+  assert.equal(app.videoSpeedValue.textContent, "2x");
+  resolveFirst({ ok: true, videoSpeed: 0.5 });
+  await app.settle();
+  assert.deepEqual(speeds, [1, 0.5, 2]);
+  assert.equal(app.videoSpeed.value, "2");
+});
+
+Deno.test("speed snaps while dragging and allows precise keyboard values", async () => {
+  const speeds = [];
+  const app = await setup({
+    connected: true,
+    sendMessage: async (_tab, message) => {
+      if (message.type.endsWith(":status")) {
+        return { ok: true, playing: false, videoId: "first", videoSpeed: 1 };
+      }
+      if (message.type.endsWith(":video-speed")) {
+        speeds.push(message.speed);
+        return { ok: true, videoSpeed: message.speed };
+      }
+      return { ok: true };
+    }
+  });
+  app.startSpeedDrag();
+  for (const [value, expected] of [[0.94, 0.94], [0.95, 1], [1.05, 1], [1.06, 1.06]]) {
+    app.setVideoSpeed(value);
+    assert.equal(app.videoSpeed.value, String(expected));
+    assert.equal(app.videoSpeedValue.textContent, `${expected}x`);
+    await app.settle();
+    assert.equal(speeds.at(-1), expected);
+  }
+  app.finishSpeedDrag();
+  app.setVideoSpeed(0.99);
+  await app.settle();
+  assert.equal(speeds.at(-1), 0.99);
+  assert.equal(app.videoSpeed.value, "0.99");
+});
+
+Deno.test("double-click resets speed and restores volume, including when muted", async () => {
+  const messages = [];
+  const app = await setup({
+    connected: true,
+    sendMessage: async (_tab, message) => {
+      if (message.type.endsWith(":status")) {
+        return { ok: true, playing: false, videoId: "first", videoSpeed: 1,
+          videoVolume: 0.4, videoMuted: true };
+      }
+      if (message.type.endsWith(":video-speed")) {
+        messages.push(["speed", message.speed]);
+        return { ok: true, videoSpeed: message.speed };
+      }
+      if (message.type.endsWith(":video-volume")) {
+        messages.push(["volume", message.volume]);
+        return { ok: true, videoVolume: message.volume / 100, videoMuted: false };
+      }
+      return { ok: true };
+    }
+  });
+  app.setVideoSpeed(1.5);
+  app.resetSpeed();
+  app.resetVolume();
+  assert.equal(app.videoSpeed.value, "1");
+  assert.equal(app.videoSpeedValue.textContent, "1x");
+  assert.equal(app.videoVolume.value, "100");
+  await app.settle();
+  assert.deepEqual(messages, [["speed", 1], ["volume", 100]]);
+  assert.equal(app.videoVolume.attributes["aria-valuetext"], "100%");
 });
 
 Deno.test("video volume tracks YouTube, controls only its video, and reports failures", async () => {

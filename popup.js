@@ -24,6 +24,8 @@ const connectBox = document.querySelector("#connect");
 const videoTitle = document.querySelector("#video-title");
 const videoPlayback = document.querySelector("#video-playback");
 const videoVolume = document.querySelector("#video-volume");
+const videoSpeed = document.querySelector("#video-speed");
+const videoSpeedValue = document.querySelector("#video-speed-value");
 const link = document.querySelector("#link");
 const optionsToggle = document.querySelector("#options-toggle");
 const optionsMenu = document.querySelector("#options-menu");
@@ -44,6 +46,10 @@ let videoPlaybackPending = false;
 let volumePending = false;
 let desiredVolume = null;
 let lastVideoVolume = null;
+let speedPending = false;
+let desiredSpeed = null;
+let lastVideoSpeed = null;
+let speedNeedsReset = true;
 let videoAvailable = false;
 let selectedStep = null;
 let lastStepSerial = -1;
@@ -886,7 +892,7 @@ document.addEventListener("keydown", event => {
   if ((event.key === "ArrowLeft" || event.key === "ArrowRight") &&
       tabId !== null && event.target !== bpmInput && !inputs.includes(event.target) &&
       !optionsMenu.contains(event.target) && event.target !== optionsToggle &&
-      event.target !== padMode && event.target !== videoVolume) {
+      event.target !== padMode && event.target !== videoVolume && event.target !== videoSpeed) {
     event.preventDefault();
     send("seek", { direction: event.key === "ArrowLeft" ? "backward" : "forward" })
       .catch(error => showStatus(error.message || "could not seek the video.", true));
@@ -910,6 +916,7 @@ document.addEventListener("keydown", event => {
       event.target !== padMode &&
       event.target !== videoPlayback &&
       event.target !== videoVolume &&
+      event.target !== videoSpeed &&
       event.target !== transport &&
       event.target !== bpmDecrease && event.target !== bpmIncrease) {
     if (lockButtons.includes(event.target)) return;
@@ -920,7 +927,7 @@ document.addEventListener("keydown", event => {
     if (inputs.includes(document.activeElement)) document.activeElement.blur();
     selectStep(null);
   } else if (/^[0-9]$/.test(event.key) && event.target !== bpmInput &&
-      event.target !== videoVolume) {
+      event.target !== videoVolume && event.target !== videoSpeed) {
     event.preventDefault();
     const button = padButtons.get(event.key);
     if (!padMode.checked && button && !button.disabled && !lockedPads.has(event.key)) {
@@ -1143,6 +1150,7 @@ function updateState(state, hydrate = false) {
   playing = chorusSession ? chorusSession.playing : state.playing;
   if ("videoPaused" in state) updateVideoPlayback(state.videoPaused);
   if ("videoVolume" in state) updateVideoVolume(state.videoVolume, state.videoMuted);
+  if ("videoSpeed" in state) updateVideoSpeed(state.videoSpeed);
   if (Array.isArray(state.lockedSteps)) setLockedSteps(state.lockedSteps);
   settings.disabled = false;
   bpmInput.disabled = false;
@@ -1234,7 +1242,7 @@ function updateVideoVolume(volume, muted) {
   }
 }
 
-videoVolume.addEventListener("input", () => {
+function changeVideoVolume() {
   desiredVolume = Number(videoVolume.value);
   if (volumePending) return;
   volumePending = true;
@@ -1254,6 +1262,86 @@ videoVolume.addEventListener("input", () => {
       if (lastVideoVolume) updateVideoVolume(lastVideoVolume.volume, lastVideoVolume.muted);
     }
   });
+}
+
+videoVolume.addEventListener("input", changeVideoVolume);
+videoVolume.addEventListener("dblclick", () => {
+  videoVolume.value = "100";
+  changeVideoVolume();
+});
+
+function updateVideoSpeed(speed) {
+  if (tabId === null) return;
+  if (!Number.isFinite(speed) || speed <= 0) {
+    lastVideoSpeed = null;
+    videoSpeed.disabled = true;
+    return;
+  }
+  lastVideoSpeed = speed;
+  if (speedNeedsReset) {
+    speedNeedsReset = false;
+    if (speed !== 1) {
+      videoSpeed.disabled = true;
+      desiredSpeed = 1;
+      sendVideoSpeed();
+      return;
+    }
+  }
+  videoSpeed.disabled = false;
+  if (!speedPending) {
+    videoSpeed.value = String(speed);
+    videoSpeedValue.textContent = `${speed}x`;
+    videoSpeed.setAttribute("aria-valuetext", `${speed}x`);
+  }
+}
+
+function sendVideoSpeed() {
+  if (speedPending) return;
+  speedPending = true;
+  const targetTab = tabId;
+  const targetVideo = videoId;
+  enqueue(async () => {
+    try {
+      while (desiredSpeed !== null && tabId === targetTab && videoId === targetVideo) {
+        const speed = desiredSpeed;
+        desiredSpeed = null;
+        const state = await send("video-speed", { speed, videoId: targetVideo });
+        if (tabId === targetTab && videoId === targetVideo) updateVideoSpeed(state.videoSpeed);
+      }
+    } catch (error) {
+      desiredSpeed = null;
+      showStatus(error.message || "could not change the video speed.", true);
+    } finally {
+      speedPending = false;
+      if (lastVideoSpeed !== null) updateVideoSpeed(lastVideoSpeed);
+    }
+  });
+}
+
+let speedPointer = null;
+function changeVideoSpeed() {
+  const speed = Number(videoSpeed.value);
+  if (speedPointer !== null && speed >= 0.95 && speed <= 1.05) videoSpeed.value = "1";
+  desiredSpeed = Number(videoSpeed.value);
+  videoSpeedValue.textContent = `${desiredSpeed}x`;
+  videoSpeed.setAttribute("aria-valuetext", `${desiredSpeed}x`);
+  sendVideoSpeed();
+}
+
+videoSpeed.addEventListener("input", changeVideoSpeed);
+videoSpeed.addEventListener("pointerdown", event => {
+  speedPointer = event.pointerId;
+});
+document.addEventListener("pointerup", event => {
+  if (speedPointer === null || event.pointerId !== speedPointer) return;
+  speedPointer = null;
+});
+document.addEventListener("pointercancel", event => {
+  if (speedPointer !== null && event.pointerId === speedPointer) speedPointer = null;
+});
+videoSpeed.addEventListener("dblclick", () => {
+  videoSpeed.value = "1";
+  changeVideoSpeed();
 });
 
 function updateStepIndicator(state) {
@@ -1303,6 +1391,13 @@ function setUnavailable(message) {
   videoVolume.disabled = true;
   desiredVolume = null;
   lastVideoVolume = null;
+  videoSpeed.disabled = true;
+  videoSpeed.value = "1";
+  videoSpeedValue.textContent = "1x";
+  videoSpeed.setAttribute("aria-valuetext", "1x");
+  desiredSpeed = null;
+  lastVideoSpeed = null;
+  speedNeedsReset = true;
   showStatus(message, true);
 }
 
@@ -1657,6 +1752,7 @@ async function initialize() {
       if (tabId === null) return;
       if ("videoPaused" in message) updateVideoPlayback(message.videoPaused);
       if ("videoVolume" in message) updateVideoVolume(message.videoVolume, message.videoMuted);
+      if ("videoSpeed" in message) updateVideoSpeed(message.videoSpeed);
       if (Array.isArray(message.lockedSteps)) setLockedSteps(message.lockedSteps);
       if (message.metronomeError) {
         chorusCommand("metronome", { enabled: false }).catch(error =>

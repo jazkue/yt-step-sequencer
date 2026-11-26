@@ -63,7 +63,8 @@
       videoDuration: Number.isFinite(duration) && duration >= 0 ? duration : null,
       videoPaused: video ? video.paused : null,
       videoVolume: video ? video.volume : null,
-      videoMuted: video ? video.muted : null
+      videoMuted: video ? video.muted : null,
+      videoSpeed: video ? video.playbackRate : null
     };
   }
 
@@ -254,6 +255,10 @@
     if (target !== document.querySelector(".html5-video-player")?.querySelector("video")) return;
     notifyObservers({ videoVolume: target.volume, videoMuted: target.muted });
   }, true);
+  document.addEventListener("ratechange", ({ target }) => {
+    if (target !== document.querySelector(".html5-video-player")?.querySelector("video")) return;
+    notifyObservers({ videoSpeed: target.playbackRate });
+  }, true);
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!message || typeof message.type !== "string" ||
         !message.type.startsWith(MESSAGE_PREFIX)) return;
@@ -280,6 +285,20 @@
       video.volume = message.volume / 100;
       if (message.volume > 0) video.muted = false;
       sendResponse({ ok: true, videoVolume: video.volume, videoMuted: video.muted });
+      return;
+    }
+    if (message.type === `${MESSAGE_PREFIX}video-speed`) {
+      if (!Number.isFinite(message.speed) || message.speed < 0.25 || message.speed > 2) {
+        sendResponse({ ok: false, error: "Speed must be between 0.25 and 2." });
+        return;
+      }
+      const video = document.querySelector(".html5-video-player")?.querySelector("video");
+      if (!currentVideoId() || currentVideoId() !== message.videoId || !video) {
+        sendResponse({ ok: false, error: "The video changed or the player is unavailable." });
+        return;
+      }
+      video.playbackRate = message.speed;
+      sendResponse({ ok: true, videoSpeed: video.playbackRate });
       return;
     }
     if (message.type === `${MESSAGE_PREFIX}video-toggle`) {
